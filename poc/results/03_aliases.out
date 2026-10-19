@@ -1,0 +1,65 @@
+SET optimizer = off;
+SET
+SET gg_planman.log_usage = notice;
+SET
+SET pg_hint_plan.debug_print = on;
+SET
+SET client_min_messages = log;
+SET
+=== stored hints mention t1 t2; query uses aliases a b: another key, nothing applied ===
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 a JOIN t2 b ON a.id = b.t1_id WHERE a.v < 500;
+psql:03_aliases.sql:7: LOG:  statement: EXPLAIN (COSTS off) SELECT count(*) FROM t1 a JOIN t2 b ON a.id = b.t1_id WHERE a.v < 500;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (b.t1_id = a.id)
+                     ->  Seq Scan on t2 b
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1 a
+                                       Recheck Cond: (v < 500)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 500)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+=== hints registered for the aliased form ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 a JOIN t2 b ON a.id = b.t1_id WHERE a.v < 1', 'NestLoop(a b) Leading((a b))');
+psql:03_aliases.sql:9: LOG:  statement: SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 a JOIN t2 b ON a.id = b.t1_id WHERE a.v < 1', 'NestLoop(a b) Leading((a b))');
+ id  |       key_base       |       key_oid        |             slots             
+-----+----------------------+----------------------+-------------------------------
+ 221 | -8572375589231877517 | -2196023937154180450 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 a JOIN t2 b ON a.id = b.t1_id WHERE a.v < 500;
+psql:03_aliases.sql:10: LOG:  statement: EXPLAIN (COSTS off) SELECT count(*) FROM t1 a JOIN t2 b ON a.id = b.t1_id WHERE a.v < 500;
+psql:03_aliases.sql:10: NOTICE:  gg_planman: applying hints "NestLoop(a b) Leading((a b))" id=221 key_base=-8572375589231877517 key_oid=-2196023937154180450
+psql:03_aliases.sql:10: LOG:  pg_hint_plan:
+used hint:
+NestLoop(a b)
+Leading((a b))
+not used hint:
+duplication hint:
+error hint:
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Bitmap Heap Scan on t1 a
+                                 Recheck Cond: (v < 500)
+                                 ->  Bitmap Index Scan on t1_v_idx
+                                       Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2 b
+                           Index Cond: (t1_id = a.id)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+RESET client_min_messages;
+psql:03_aliases.sql:11: LOG:  statement: RESET client_min_messages;
+RESET

@@ -1,0 +1,157 @@
+SET gg_planman.log_usage = notice;
+SET
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+DROP TABLE IF EXISTS pt CASCADE;
+psql:11_partitions_views.sql:4: NOTICE:  table "pt" does not exist, skipping
+DROP TABLE
+CREATE TABLE pt (id int, d date, v int) DISTRIBUTED BY (id)
+  PARTITION BY RANGE (d) (START ('2026-01-01') END ('2026-04-01') EVERY (INTERVAL '1 month'));
+CREATE TABLE
+INSERT INTO pt SELECT i, date '2026-01-01' + (i % 90), i % 1000 FROM generate_series(1, 90000) i;
+INSERT 0 90000
+CREATE INDEX pt_v_idx ON pt (v);
+CREATE INDEX
+ANALYZE pt;
+ANALYZE
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM pt WHERE v = 1 AND d >= ''2026-02-01''', 'SeqScan(pt)');
+ id  |       key_base       |       key_oid        |      slots      
+-----+----------------------+----------------------+-----------------
+ 161 | -7786432044238861103 | -1370818729314017378 | {public.pt=oid}
+(1 row)
+
+=== partitioned table, Postgres planner ===
+SET optimizer = off;
+SET
+SET gg_planman.enabled = off;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM pt WHERE v = 7 AND d >= '2026-02-01';
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Append
+                     ->  Bitmap Heap Scan on pt_1_prt_2
+                           Recheck Cond: (v = 7)
+                           Filter: (d >= '2026-02-01'::date)
+                           ->  Bitmap Index Scan on pt_1_prt_2_v_idx
+                                 Index Cond: (v = 7)
+                     ->  Bitmap Heap Scan on pt_1_prt_3
+                           Recheck Cond: (v = 7)
+                           Filter: (d >= '2026-02-01'::date)
+                           ->  Bitmap Index Scan on pt_1_prt_3_v_idx
+                                 Index Cond: (v = 7)
+ Optimizer: Postgres-based planner
+(15 rows)
+
+SET gg_planman.enabled = on;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM pt WHERE v = 7 AND d >= '2026-02-01';
+psql:11_partitions_views.sql:16: NOTICE:  gg_planman: applying hints "SeqScan(pt)" id=161 key_base=-7786432044238861103 key_oid=-1370818729314017378
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Append
+                     ->  Seq Scan on pt_1_prt_2
+                           Filter: ((d >= '2026-02-01'::date) AND (v = 7))
+                     ->  Seq Scan on pt_1_prt_3
+                           Filter: ((d >= '2026-02-01'::date) AND (v = 7))
+ Optimizer: Postgres-based planner
+(9 rows)
+
+=== partitioned table, ORCA ===
+SET optimizer = on;
+SET
+SET gg_planman.enabled = off;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM pt WHERE v = 7 AND d >= '2026-02-01';
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Dynamic Index Scan on pt_v_idx on pt
+                     Index Cond: (v = 7)
+                     Filter: ((v = 7) AND (d >= '2026-02-01'::date))
+                     Number of partitions to scan: 2 (out of 3)
+ Optimizer: GPORCA
+(8 rows)
+
+SET gg_planman.enabled = on;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM pt WHERE v = 7 AND d >= '2026-02-01';
+psql:11_partitions_views.sql:22: NOTICE:  gg_planman: applying hints "SeqScan(pt)" id=161 key_base=-7786432044238861103 key_oid=-1370818729314017378
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Dynamic Seq Scan on pt
+                     Number of partitions to scan: 2 (out of 3)
+                     Filter: ((v = 7) AND (d >= '2026-02-01'::date))
+ Optimizer: GPORCA
+(7 rows)
+
+=== view over the join ===
+SET optimizer = off;
+SET
+CREATE OR REPLACE VIEW v_join AS SELECT t1.v, t2.w FROM t1 JOIN t2 ON t1.id = t2.t1_id;
+CREATE VIEW
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM v_join WHERE v < 1', 'NestLoop(t1 t2) Leading((t1 t2))');
+ id  |      key_base       |       key_oid        |                               slots                               
+-----+---------------------+----------------------+-------------------------------------------------------------------
+ 162 | 4970944348066184350 | -5358112476030062867 | {public.v_join=oid,public.v_join=oid,public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM v_join WHERE v < 500;
+psql:11_partitions_views.sql:27: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=162 key_base=4970944348066184350 key_oid=-5358112476030062867
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Bitmap Heap Scan on t1
+                                 Recheck Cond: (v < 500)
+                                 ->  Bitmap Index Scan on t1_v_idx
+                                       Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+=== the same join written without the view has another key ===
+SELECT (SELECT key_oid FROM gg_planman.query_key('SELECT count(*) FROM v_join WHERE v < 1')) = (SELECT key_oid FROM gg_planman.query_key('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1')) AS same_key;
+ same_key 
+----------
+ f
+(1 row)
+
+=== CREATE TABLE AS with stored hints ===
+SELECT * FROM gg_planman.register_hints('SELECT t1.id FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'NestLoop(t1 t2) Leading((t1 t2))');
+ id  |       key_base       |       key_oid        |             slots             
+-----+----------------------+----------------------+-------------------------------
+ 163 | -1037572306802761970 | -2412850071093074627 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) CREATE TABLE ctas_t AS SELECT t1.id FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500 DISTRIBUTED BY (id);
+psql:11_partitions_views.sql:32: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=163 key_base=-1037572306802761970 key_oid=-2412850071093074627
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Redistribute Motion 3:3  (slice1; segments: 3)
+   Hash Key: t1.id
+   ->  Nested Loop
+         ->  Broadcast Motion 3:3  (slice2; segments: 3)
+               ->  Bitmap Heap Scan on t1
+                     Recheck Cond: (v < 500)
+                     ->  Bitmap Index Scan on t1_v_idx
+                           Index Cond: (v < 500)
+         ->  Index Only Scan using t2_t1_id_idx on t2
+               Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(11 rows)
+

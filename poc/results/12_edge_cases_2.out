@@ -1,0 +1,63 @@
+SELECT hints, query FROM gg_planman.plans ORDER BY created_at;
+ hints | query 
+-------+-------
+(0 rows)
+
+=== the application sends its own hint comment: its hints are applied, the stored ones are not ===
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+SET optimizer = off;
+SET
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'NestLoop(t1 t2) Leading((t1 t2))');
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 181 | 1110863247016496802 | 5516559490127072749 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+SET pg_hint_plan.debug_print = on;
+SET
+SET client_min_messages = log;
+SET
+/*+ HashJoin(t1 t2) */ EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:12_edge_cases_2.sql:9: LOG:  statement: /*+ HashJoin(t1 t2) */ EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:12_edge_cases_2.sql:9: LOG:  pg_hint_plan:
+used hint:
+HashJoin(t1 t2)
+not used hint:
+duplication hint:
+error hint:
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 500)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 500)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+RESET client_min_messages;
+psql:12_edge_cases_2.sql:10: LOG:  statement: RESET client_min_messages;
+RESET
+RESET pg_hint_plan.debug_print;
+RESET
+=== ORCA falls back to the Postgres planner: are stored hints applied? ===
+SET optimizer = on;
+SET
+SET optimizer_trace_fallback = on;
+SET
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+SET gg_planman.enabled = off;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < 500 AND EXISTS (SELECT 1 FROM t2 WHERE t2.t1_id = t1.id) GROUP BY ROLLUP (v) ORDER BY 1 LIMIT 5 FOR UPDATE;
+psql:12_edge_cases_2.sql:18: ERROR:  FOR UPDATE is not allowed with GROUP BY clause
+SET gg_planman.enabled = on;
+SET

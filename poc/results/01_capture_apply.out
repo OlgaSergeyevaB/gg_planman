@@ -1,0 +1,124 @@
+SET client_min_messages = notice;
+SET
+SET gg_planman.log_usage = notice;
+SET
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+=== Postgres planner, no hints ===
+SET optimizer = off;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 100;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 100)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 100)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+=== capture: DBA runs the query once with a hint comment ===
+SET gg_planman.write_mode = on;
+SET
+/*+ NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2)) */
+SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 100;
+psql:01_capture_apply.sql:13: NOTICE:  gg_planman: stored hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=201 key_base=1110863247016496802 key_oid=5750746670750338341
+ count 
+-------
+  4000
+(1 row)
+
+SET gg_planman.write_mode = off;
+SET
+SELECT key_base, key_oid, enabled, hints, relnames, reloids::text FROM gg_planman.plans;
+      key_base       |       key_oid       | enabled |                          hints                          | relnames |    reloids    
+---------------------+---------------------+---------+---------------------------------------------------------+----------+---------------
+ 1110863247016496802 | 5750746670750338341 | t       | NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2)) | {t1,t2}  | {79166,79171}
+(1 row)
+
+=== Postgres planner, same query, other constant, no comment ===
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:01_capture_apply.sql:18: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=201 key_base=1110863247016496802 key_oid=5750746670750338341
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(10 rows)
+
+=== results are the same with and without gg_planman ===
+SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:01_capture_apply.sql:21: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=201 key_base=1110863247016496802 key_oid=5750746670750338341
+ count 
+-------
+ 20000
+(1 row)
+
+SET gg_planman.enabled = off;
+SET
+SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+ count 
+-------
+ 20000
+(1 row)
+
+SET gg_planman.enabled = on;
+SET
+=== ORCA, no gg_planman ===
+SET optimizer = on;
+SET
+SET gg_planman.enabled = off;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: t2.t1_id
+                           ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+ Optimizer: GPORCA
+(12 rows)
+
+SET gg_planman.enabled = on;
+SET
+=== ORCA with stored hints ===
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:01_capture_apply.sql:33: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=201 key_base=1110863247016496802 key_oid=5750746670750338341
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t1.id = t2.t1_id)
+                     ->  Index Scan using t1_v_idx on t1
+                           Index Cond: (v < 500)
+                     ->  Hash
+                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                                 Hash Key: t2.t1_id
+                                 ->  Seq Scan on t2
+ Optimizer: GPORCA
+(12 rows)
+

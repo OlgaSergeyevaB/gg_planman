@@ -1,0 +1,32 @@
+point base                         enabled=off rep=1 us_per_plan=18.6
+point base                         enabled=off rep=2 us_per_plan=17.9
+point base                         enabled=off rep=3 us_per_plan=18.2
+point miss, no names               enabled=on  rep=1 us_per_plan=21.2
+point miss, no names               enabled=on  rep=2 us_per_plan=20.7
+point miss, no names               enabled=on  rep=3 us_per_plan=21.4
+join base                          enabled=off rep=1 us_per_plan=66.4
+join base                          enabled=off rep=2 us_per_plan=67.2
+join base                          enabled=off rep=3 us_per_plan=66.4
+join miss, no names                enabled=on  rep=1 us_per_plan=73.6
+join miss, no names                enabled=on  rep=2 us_per_plan=75.4
+join miss, no names                enabled=on  rep=3 us_per_plan=74.9
+point miss, 200 names              enabled=on  rep=1 us_per_plan=21.0
+point miss, 200 names              enabled=on  rep=2 us_per_plan=21.0
+point miss, 200 names              enabled=on  rep=3 us_per_plan=20.8
+join miss, 200 names               enabled=on  rep=1 us_per_plan=74.2
+join miss, 200 names               enabled=on  rep=2 us_per_plan=75.8
+join miss, 200 names               enabled=on  rep=3 us_per_plan=74.8
+point hit by OID, 200 names        enabled=on  rep=1 us_per_plan=25.9
+point hit by OID, 200 names        enabled=on  rep=2 us_per_plan=25.9
+point hit by OID, 200 names        enabled=on  rep=3 us_per_plan=25.7
+join hit by OID, 200 names         enabled=on  rep=1 us_per_plan=90.2
+join hit by OID, 200 names         enabled=on  rep=2 us_per_plan=91.3
+join hit by OID, 200 names         enabled=on  rep=3 us_per_plan=87.9
+rows matched by name: 202, rules of t1 and t2 rows: {name,name} {name}
+point hit by name, 202 names       enabled=on  rep=1 us_per_plan=26.9
+point hit by name, 202 names       enabled=on  rep=2 us_per_plan=26.3
+point hit by name, 202 names       enabled=on  rep=3 us_per_plan=26.5
+join hit by name, 202 names        enabled=on  rep=1 us_per_plan=91.6
+join hit by name, 202 names        enabled=on  rep=2 us_per_plan=92.2
+join hit by name, 202 names        enabled=on  rep=3 us_per_plan=91.2
+done

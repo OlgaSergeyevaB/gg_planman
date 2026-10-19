@@ -1,0 +1,26 @@
+plans rows: 10000
+base       point  optimizer=off enabled=off rep=1 tps=1868.233693 latency_ms=4.282
+base       point  optimizer=off enabled=off rep=2 tps=2134.421338 latency_ms=3.748
+miss       point  optimizer=off enabled=on  rep=1 tps=1803.108017 latency_ms=4.437
+miss       point  optimizer=off enabled=on  rep=2 tps=1824.599028 latency_ms=4.385
+base       join   optimizer=off enabled=off rep=1 tps=266.155668 latency_ms=30.058
+base       join   optimizer=off enabled=off rep=2 tps=264.802885 latency_ms=30.211
+miss       join   optimizer=off enabled=on  rep=1 tps=257.921640 latency_ms=31.017
+miss       join   optimizer=off enabled=on  rep=2 tps=259.293002 latency_ms=30.853
+base       point  optimizer=on  enabled=off rep=1 tps=926.150315 latency_ms=8.638
+base       point  optimizer=on  enabled=off rep=2 tps=892.404434 latency_ms=8.965
+miss       point  optimizer=on  enabled=on  rep=1 tps=921.009387 latency_ms=8.686
+miss       point  optimizer=on  enabled=on  rep=2 tps=945.242767 latency_ms=8.463
+base       join   optimizer=on  enabled=off rep=1 tps=751.033577 latency_ms=10.652
+base       join   optimizer=on  enabled=off rep=2 tps=718.650925 latency_ms=11.132
+miss       join   optimizer=on  enabled=on  rep=1 tps=723.355221 latency_ms=11.060
+miss       join   optimizer=on  enabled=on  rep=2 tps=738.089996 latency_ms=10.839
+hit        point  optimizer=off enabled=on  rep=1 tps=1817.074588 latency_ms=4.403
+hit        point  optimizer=off enabled=on  rep=2 tps=1658.496022 latency_ms=4.824
+hit        join   optimizer=off enabled=on  rep=1 tps=262.396036 latency_ms=30.488
+hit        join   optimizer=off enabled=on  rep=2 tps=256.380377 latency_ms=31.204
+hit        point  optimizer=on  enabled=on  rep=1 tps=914.049213 latency_ms=8.752
+hit        point  optimizer=on  enabled=on  rep=2 tps=903.032836 latency_ms=8.859
+hit        join   optimizer=on  enabled=on  rep=1 tps=803.234626 latency_ms=9.960
+hit        join   optimizer=on  enabled=on  rep=2 tps=811.742883 latency_ms=9.855
+done

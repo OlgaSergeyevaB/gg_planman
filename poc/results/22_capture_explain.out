@@ -1,0 +1,165 @@
+SET client_min_messages = warning;
+TRUNCATE gg_planman.plans;
+DROP TABLE IF EXISTS cap_t, cap_t_new, cap_t2;
+CREATE TABLE cap_t (id int, v int) DISTRIBUTED BY (id);
+INSERT INTO cap_t SELECT i, i % 100 FROM generate_series(1, 10000) i;
+CREATE INDEX cap_t_v_idx ON cap_t (v);
+ANALYZE cap_t;
+RESET client_min_messages;
+SET optimizer = off;
+SET
+SET gg_planman.log_usage = notice;
+SET
+SET gg_planman.write_mode = on;
+SET
+=== 1. EXPLAIN with a hint comment in write mode: the plan shows the hints, nothing is stored, the warning says how to store ===
+/*+ SeqScan(cap_t) */ EXPLAIN (COSTS off) SELECT count(*) FROM cap_t WHERE v < 1;
+psql:22_capture_explain.sql:18: WARNING:  gg_planman: statement not captured: EXPLAIN is not stored, run the statement or call gg_planman.register_hints
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on cap_t
+                     Filter: (v < 1)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+SELECT count(*) AS stored_rows FROM gg_planman.plans;
+ stored_rows 
+-------------
+           0
+(1 row)
+
+=== 2. the same for EXPLAIN ANALYZE VERBOSE and for the comment after the option list ===
+/*+ IndexScan(cap_t cap_t_v_idx) */ EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM cap_t WHERE v < 2;
+psql:22_capture_explain.sql:23: WARNING:  gg_planman: statement not captured: EXPLAIN is not stored, run the statement or call gg_planman.register_hints
+EXPLAIN (COSTS off, FORMAT text) /*+ BitmapScan(cap_t cap_t_v_idx) */ SELECT count(*) FROM cap_t WHERE v < 3;
+psql:22_capture_explain.sql:25: WARNING:  gg_planman: statement not captured: EXPLAIN is not stored, run the statement or call gg_planman.register_hints
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Bitmap Heap Scan on cap_t
+                     Recheck Cond: (v < 3)
+                     ->  Bitmap Index Scan on cap_t_v_idx
+                           Index Cond: (v < 3)
+ Optimizer: Postgres-based planner
+(8 rows)
+
+SELECT count(*) AS stored_rows FROM gg_planman.plans;
+ stored_rows 
+-------------
+           0
+(1 row)
+
+=== 3. running the statement once stores it; the row applies, the check finds it valid, and after a recreation it regenerates ===
+/*+ SeqScan(cap_t) */ SELECT count(*) FROM cap_t WHERE v < 1;
+psql:22_capture_explain.sql:29: NOTICE:  gg_planman: stored hints "SeqScan(cap_t)" id=281 key_base=-5383995146553479389 key_oid=-6448114844370865921
+ count 
+-------
+   100
+(1 row)
+
+SELECT hints, query FROM gg_planman.plans;
+     hints      |                             query                             
+----------------+---------------------------------------------------------------
+ SeqScan(cap_t) | /*+ SeqScan(cap_t) */ SELECT count(*) FROM cap_t WHERE v < 1;
+(1 row)
+
+SET gg_planman.write_mode = off;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM cap_t WHERE v < 1;
+psql:22_capture_explain.sql:32: NOTICE:  gg_planman: applying hints "SeqScan(cap_t)" id=281 key_base=-5383995146553479389 key_oid=-6448114844370865921
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on cap_t
+                     Filter: (v < 1)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+SELECT identity, state, reason FROM gg_planman.check();
+ identity  | state | reason 
+-----------+-------+--------
+ oid:79259 | valid | 
+(1 row)
+
+SET client_min_messages = warning;
+CREATE TABLE cap_t_new AS SELECT * FROM cap_t DISTRIBUTED BY (id);
+DROP TABLE cap_t;
+ALTER TABLE cap_t_new RENAME TO cap_t;
+CREATE INDEX cap_t_v_idx ON cap_t (v);
+ANALYZE cap_t;
+RESET client_min_messages;
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+ identity  |    state    |              reason              
+-----------+-------------+----------------------------------
+ oid:79259 | regenerated | table public.cap_t was recreated
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM cap_t WHERE v < 1;
+psql:22_capture_explain.sql:44: NOTICE:  gg_planman: applying hints "SeqScan(cap_t)" id=281 key_base=-5383995146553479389 key_oid=-6448114844370865981
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on cap_t
+                     Filter: (v < 1)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+=== 4. the registration refuses an EXPLAIN text with a hint; the statement inside it is registered ===
+SELECT * FROM gg_planman.register_hints('EXPLAIN SELECT count(*) FROM cap_t WHERE v < 1', 'IndexScan(cap_t cap_t_v_idx)');
+psql:22_capture_explain.sql:47: ERROR:  utility statements cannot have hints
+HINT:  The text is an EXPLAIN: register the statement inside it.
+SELECT id, slots FROM gg_planman.register_hints('SELECT count(*) FROM cap_t WHERE v < 1', 'IndexScan(cap_t cap_t_v_idx)');
+ id  |       slots        
+-----+--------------------
+ 281 | {public.cap_t=oid}
+(1 row)
+
+SELECT hints, query FROM gg_planman.plans;
+            hints             |                 query                  
+------------------------------+----------------------------------------
+ IndexScan(cap_t cap_t_v_idx) | SELECT count(*) FROM cap_t WHERE v < 1
+(1 row)
+
+=== 5. a statement the registration would refuse is not captured: EXPLAIN EXECUTE, CREATE TABLE AS ===
+SET gg_planman.write_mode = on;
+SET
+PREPARE p(int) AS SELECT count(*) FROM cap_t WHERE v < $1;
+PREPARE
+/*+ SeqScan(cap_t) */ EXPLAIN (COSTS off) EXECUTE p(1);
+psql:22_capture_explain.sql:54: WARNING:  gg_planman: statement not captured: EXPLAIN is not stored, run the statement or call gg_planman.register_hints
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Bitmap Heap Scan on cap_t
+                     Recheck Cond: (v < 1)
+                     ->  Bitmap Index Scan on cap_t_v_idx
+                           Index Cond: (v < 1)
+ Optimizer: Postgres-based planner
+(8 rows)
+
+/*+ SeqScan(cap_t) */ CREATE TABLE cap_t2 AS SELECT count(*) AS n FROM cap_t WHERE v < 1 DISTRIBUTED BY (n);
+psql:22_capture_explain.sql:55: WARNING:  gg_planman: statement not captured: utility statements cannot have hints
+SELECT 1
+SET gg_planman.write_mode = off;
+SET
+SELECT hints, query FROM gg_planman.plans;
+            hints             |                 query                  
+------------------------------+----------------------------------------
+ IndexScan(cap_t cap_t_v_idx) | SELECT count(*) FROM cap_t WHERE v < 1
+(1 row)
+
+SET client_min_messages = warning;
+DEALLOCATE p;
+DROP TABLE IF EXISTS cap_t, cap_t2;
+TRUNCATE gg_planman.plans;

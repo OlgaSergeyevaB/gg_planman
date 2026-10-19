@@ -1,0 +1,102 @@
+SET client_min_messages = warning;
+SET
+DROP TABLE IF EXISTS kt, kt_new, k2 CASCADE;
+DROP TABLE
+DROP FUNCTION IF EXISTS kf(int);
+DROP FUNCTION
+RESET client_min_messages;
+RESET
+=== 1. columns enter the key by attribute number ===
+CREATE TABLE kt (a int, b int, c int) DISTRIBUTED BY (a);
+CREATE TABLE
+SELECT 'kt(a,b,c): WHERE c < 1' AS step, key_base, key_oid FROM gg_planman.query_key('SELECT count(*) FROM kt WHERE c < 1');
+          step          |       key_base       |       key_oid       
+------------------------+----------------------+---------------------
+ kt(a,b,c): WHERE c < 1 | -1743380901289718968 | -378630937232105759
+(1 row)
+
+ALTER TABLE kt DROP COLUMN b;
+ALTER TABLE
+SELECT 'after DROP COLUMN b, c keeps number 3' AS step, key_base, key_oid FROM gg_planman.query_key('SELECT count(*) FROM kt WHERE c < 1');
+                 step                  |       key_base       |       key_oid       
+---------------------------------------+----------------------+---------------------
+ after DROP COLUMN b, c keeps number 3 | -1743380901289718968 | -378630937232105759
+(1 row)
+
+CREATE TABLE kt_new AS SELECT * FROM kt DISTRIBUTED BY (a);
+SELECT 0
+DROP TABLE kt;
+DROP TABLE
+ALTER TABLE kt_new RENAME TO kt;
+ALTER TABLE
+SELECT 'after recreation, c gets number 2' AS step, key_base, key_oid FROM gg_planman.query_key('SELECT count(*) FROM kt WHERE c < 1');
+               step                |       key_base       |       key_oid        
+-----------------------------------+----------------------+----------------------
+ after recreation, c gets number 2 | -3155901116428862371 | -5279731203168598189
+(1 row)
+
+=== 2. another column at the same position gives the same key ===
+CREATE TABLE k2 (a int, b int) DISTRIBUTED BY (a);
+CREATE TABLE
+SELECT 'k2(a,b): WHERE b < 1' AS query, key_base, key_oid FROM gg_planman.query_key('SELECT count(*) FROM k2 WHERE b < 1');
+        query         |      key_base       |     key_oid      
+----------------------+---------------------+------------------
+ k2(a,b): WHERE b < 1 | 7873890293395937569 | -512677188626326
+(1 row)
+
+DROP TABLE k2;
+DROP TABLE
+CREATE TABLE k2 (b int, a int) DISTRIBUTED BY (b);
+CREATE TABLE
+SELECT 'k2(b,a): WHERE a < 1' AS query, key_base, key_oid FROM gg_planman.query_key('SELECT count(*) FROM k2 WHERE a < 1');
+        query         |      key_base       |     key_oid      
+----------------------+---------------------+------------------
+ k2(b,a): WHERE a < 1 | 7873890293395937569 | -512677188626321
+(1 row)
+
+=== 3. a user-defined function enters the key by OID ===
+CREATE FUNCTION kf(int) RETURNS int AS 'select $1' LANGUAGE sql IMMUTABLE;
+CREATE FUNCTION
+SELECT 'before' AS step, key_base, key_oid FROM gg_planman.query_key('SELECT count(*) FROM kt WHERE kf(a) < 1');
+  step  |      key_base       |       key_oid       
+--------+---------------------+---------------------
+ before | 1371861225537981608 | 6975754774987910535
+(1 row)
+
+CREATE OR REPLACE FUNCTION kf(int) RETURNS int AS 'select $1 + 0' LANGUAGE sql IMMUTABLE;
+CREATE FUNCTION
+SELECT 'after CREATE OR REPLACE' AS step, key_base, key_oid FROM gg_planman.query_key('SELECT count(*) FROM kt WHERE kf(a) < 1');
+          step           |      key_base       |       key_oid       
+-------------------------+---------------------+---------------------
+ after CREATE OR REPLACE | 1371861225537981608 | 6975754774987910535
+(1 row)
+
+DROP FUNCTION kf(int);
+DROP FUNCTION
+CREATE FUNCTION kf(int) RETURNS int AS 'select $1' LANGUAGE sql IMMUTABLE;
+CREATE FUNCTION
+SELECT 'after DROP and CREATE' AS step, key_base, key_oid FROM gg_planman.query_key('SELECT count(*) FROM kt WHERE kf(a) < 1');
+         step          |       key_base       |       key_oid        
+-----------------------+----------------------+----------------------
+ after DROP and CREATE | -6358603566732309362 | -3913122325483352543
+(1 row)
+
+=== 4. output column aliases and FOR UPDATE are not in the key ===
+SELECT q, key_base, key_oid FROM (
+          SELECT 1 AS n, 'SELECT v AS x FROM t1 WHERE id = 1' AS q, key_base, key_oid FROM gg_planman.query_key('SELECT v AS x FROM t1 WHERE id = 1')
+UNION ALL SELECT 2, 'SELECT v AS y FROM t1 WHERE id = 1', key_base, key_oid FROM gg_planman.query_key('SELECT v AS y FROM t1 WHERE id = 1')
+UNION ALL SELECT 3, 'SELECT v AS x FROM t1 WHERE id = 1 FOR UPDATE', key_base, key_oid FROM gg_planman.query_key('SELECT v AS x FROM t1 WHERE id = 1 FOR UPDATE')
+UNION ALL SELECT 4, 'SELECT pad AS x FROM t1 WHERE id = 1', key_base, key_oid FROM gg_planman.query_key('SELECT pad AS x FROM t1 WHERE id = 1')
+) s ORDER BY n;
+                       q                       |       key_base       |       key_oid        
+-----------------------------------------------+----------------------+----------------------
+ SELECT v AS x FROM t1 WHERE id = 1            |  3713401100546597091 | -5674359015045063761
+ SELECT v AS y FROM t1 WHERE id = 1            |  3713401100546597091 | -5674359015045063761
+ SELECT v AS x FROM t1 WHERE id = 1 FOR UPDATE |  3713401100546597091 | -5674359015045063761
+ SELECT pad AS x FROM t1 WHERE id = 1          | -4065659217736525445 |  7954479429388165062
+(4 rows)
+
+DROP TABLE kt, k2;
+DROP TABLE
+DROP FUNCTION kf(int);
+DROP FUNCTION

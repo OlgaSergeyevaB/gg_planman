@@ -1,0 +1,451 @@
+SET client_min_messages = warning;
+DROP TABLE IF EXISTS bn_dim, bn_stage, bn_stage_new, data_2025, data_2026 CASCADE;
+CREATE TABLE bn_dim (id int, v int) DISTRIBUTED BY (id);
+CREATE TABLE bn_stage (id int, v int) DISTRIBUTED BY (id);
+CREATE TABLE data_2025 (id int, v int) DISTRIBUTED BY (id);
+CREATE TABLE data_2026 (id int, v int) DISTRIBUTED BY (id);
+INSERT INTO bn_dim SELECT i, i % 1000 FROM generate_series(1, 50000) i;
+INSERT INTO bn_stage SELECT i, i % 1000 FROM generate_series(1, 50000) i;
+INSERT INTO data_2025 SELECT i, i % 1000 FROM generate_series(1, 50000) i;
+INSERT INTO data_2026 SELECT i, i % 1000 FROM generate_series(1, 50000) i;
+CREATE INDEX bn_stage_v_idx ON bn_stage (v);
+CREATE INDEX data_2025_v_idx ON data_2025 (v);
+CREATE INDEX data_2026_v_idx ON data_2026 (v);
+ANALYZE bn_dim;
+ANALYZE bn_stage;
+ANALYZE data_2025;
+ANALYZE data_2026;
+TRUNCATE gg_planman.plans;
+RESET client_min_messages;
+SET gg_planman.log_usage = notice;
+SET
+SET optimizer = on;
+SET
+=== 1. a temporary table that nothing covers is refused ===
+CREATE TEMP TABLE bn_tmp AS SELECT * FROM bn_dim WHERE v < 100 DISTRIBUTED BY (id);
+SELECT 5000
+CREATE INDEX bn_tmp_v_idx ON bn_tmp (v);
+CREATE INDEX
+ANALYZE bn_tmp;
+ANALYZE
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM bn_tmp t JOIN bn_dim d ON d.id = t.id WHERE t.v < 5', 'SeqScan(t)');
+psql:26_by_name_regex.sql:36: ERROR:  temporary table "bn_tmp" can be identified only by name
+HINT:  List it in by_name as pg_temp.bn_tmp or with a selector such as ~^pg_temp\., or match it with by_regex, to confirm that the row applies to every temporary table of that name.
+=== 2. pg_temp.bn_tmp in by_name: that slot is matched by schema and name, bn_dim by OID, and the row has no key_oid ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM bn_tmp t JOIN bn_dim d ON d.id = t.id WHERE t.v < 5', 'SeqScan(t)', by_name => '{pg_temp.bn_tmp}');
+ id  |      key_base       | key_oid |                     slots                      
+-----+---------------------+---------+------------------------------------------------
+ 441 | -503432324635278329 |         | {pg_temp.bn_tmp=schema.name,public.bn_dim=oid}
+
+SELECT key_oid, relschemas, relnames, reloids::text, rules, n_oid, n_name, n_regex, identity FROM gg_planman.plans;
+ key_oid |    relschemas    |    relnames     |   reloids    |       rules       | n_oid | n_name | n_regex |            identity             
+---------+------------------+-----------------+--------------+-------------------+-------+--------+---------+---------------------------------
+         | {pg_temp,public} | {bn_tmp,bn_dim} | {NULL,79379} | {schema.name,oid} |     1 |      1 |       0 | schema:pg_temp.bn_tmp oid:79379
+
+=== 3. another session with its own temporary table gets the hints ===
+You are now connected to database "srpoc" as user "olga".
+SET gg_planman.log_usage = notice;
+SET
+SET optimizer = on;
+SET
+CREATE TEMP TABLE bn_tmp AS SELECT * FROM bn_dim WHERE v < 200 DISTRIBUTED BY (id);
+SELECT 10000
+CREATE INDEX bn_tmp_v_idx ON bn_tmp (v);
+CREATE INDEX
+ANALYZE bn_tmp;
+ANALYZE
+EXPLAIN (COSTS off) SELECT count(*) FROM bn_tmp t JOIN bn_dim d ON d.id = t.id WHERE t.v < 9;
+psql:26_by_name_regex.sql:49: NOTICE:  gg_planman: applying hints "SeqScan(t)" id=441 key_base=-503432324635278329 key_oid=-
+                     QUERY PLAN                     
+----------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (d.id = t.id)
+                     ->  Seq Scan on bn_dim d
+                     ->  Hash
+                           ->  Seq Scan on bn_tmp t
+                                 Filter: (v < 9)
+ Optimizer: GPORCA
+
+=== 4. a table listed in by_name has to be read by the query; a pattern that matches nothing is only reported ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM bn_dim WHERE v < 5', 'SeqScan(bn_dim)', by_name => '{bn_stage}');
+psql:26_by_name_regex.sql:52: ERROR:  table "bn_stage" listed in by_name is not read by the query
+SELECT * FROM gg_planman.query_key('SELECT count(*) FROM bn_dim WHERE v < 5', by_regex => '{^public\\.nothing}');
+psql:26_by_name_regex.sql:53: NOTICE:  gg_planman: pattern "^public\.nothing" of by_regex matches no table of the query
+ id |      key_base       |       key_oid       |        slots        
+----+---------------------+---------------------+---------------------
+    | 6149751319463374719 | 9174935558548929323 | {public.bn_dim=oid}
+
+=== 5. a permanent table in by_name: the row outlives the recreation of the table, with no regeneration ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM bn_stage s JOIN bn_dim d ON d.id = s.id WHERE s.v < 5', 'SeqScan(s)', by_name => '{bn_stage}');
+ id  |       key_base       | key_oid |                  slots                   
+-----+----------------------+---------+------------------------------------------
+ 461 | -1038029572617101121 |         | {public.bn_stage=name,public.bn_dim=oid}
+
+CREATE TABLE bn_stage_new AS SELECT * FROM bn_stage DISTRIBUTED BY (id);
+SELECT 50000
+DROP TABLE bn_stage;
+DROP TABLE
+ALTER TABLE bn_stage_new RENAME TO bn_stage;
+ALTER TABLE
+CREATE INDEX bn_stage_v_idx ON bn_stage (v);
+CREATE INDEX
+ANALYZE bn_stage;
+ANALYZE
+SELECT hints, rules FROM gg_planman.plans WHERE 'bn_stage' = ANY(relnames);
+   hints    |   rules    
+------------+------------
+ SeqScan(s) | {name,oid}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM bn_stage s JOIN bn_dim d ON d.id = s.id WHERE s.v < 9;
+psql:26_by_name_regex.sql:63: NOTICE:  gg_planman: applying hints "SeqScan(s)" id=461 key_base=-1038029572617101121 key_oid=1092866507682731074
+                      QUERY PLAN                      
+------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (d.id = s.id)
+                     ->  Seq Scan on bn_dim d
+                     ->  Hash
+                           ->  Seq Scan on bn_stage s
+                                 Filter: (v < 9)
+ Optimizer: GPORCA
+
+=== 6. a row matched by OID beside it: found first while the table is the same, not found after the next recreation, when the row by name takes over and the check marks it ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM bn_stage s JOIN bn_dim d ON d.id = s.id WHERE s.v < 5', 'IndexScan(s bn_stage_v_idx)');
+ id  |       key_base       |       key_oid       |                  slots                  
+-----+----------------------+---------------------+-----------------------------------------
+ 462 | -1038029572617101121 | 1092866507682731074 | {public.bn_stage=oid,public.bn_dim=oid}
+
+SELECT key_oid IS NOT NULL AS by_oid, hints, rules FROM gg_planman.plans WHERE 'bn_stage' = ANY(relnames) ORDER BY created_at;
+ by_oid |            hints            |   rules    
+--------+-----------------------------+------------
+ f      | SeqScan(s)                  | {name,oid}
+ t      | IndexScan(s bn_stage_v_idx) | {oid,oid}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM bn_stage s JOIN bn_dim d ON d.id = s.id WHERE s.v < 9;
+psql:26_by_name_regex.sql:68: NOTICE:  gg_planman: applying hints "IndexScan(s bn_stage_v_idx)" id=462 key_base=-1038029572617101121 key_oid=1092866507682731074
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (d.id = s.id)
+                     ->  Seq Scan on bn_dim d
+                     ->  Hash
+                           ->  Index Scan using bn_stage_v_idx on bn_stage s
+                                 Index Cond: (v < 9)
+ Optimizer: GPORCA
+
+CREATE TABLE bn_stage_new AS SELECT * FROM bn_stage DISTRIBUTED BY (id);
+SELECT 50000
+DROP TABLE bn_stage;
+DROP TABLE
+ALTER TABLE bn_stage_new RENAME TO bn_stage;
+ALTER TABLE
+CREATE INDEX bn_stage_v_idx ON bn_stage (v);
+CREATE INDEX
+ANALYZE bn_stage;
+ANALYZE
+SELECT key_oid IS NOT NULL AS by_oid, hints FROM gg_planman.plans WHERE 'bn_stage' = ANY(relnames) ORDER BY created_at;
+ by_oid |            hints            
+--------+-----------------------------
+ f      | SeqScan(s)
+ t      | IndexScan(s bn_stage_v_idx)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM bn_stage s JOIN bn_dim d ON d.id = s.id WHERE s.v < 9;
+psql:26_by_name_regex.sql:75: NOTICE:  gg_planman: applying hints "SeqScan(s)" id=461 key_base=-1038029572617101121 key_oid=1020808913644803142
+                      QUERY PLAN                      
+------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (d.id = s.id)
+                     ->  Seq Scan on bn_dim d
+                     ->  Hash
+                           ->  Seq Scan on bn_stage s
+                                 Filter: (v < 9)
+ Optimizer: GPORCA
+
+SELECT identity, state, reason FROM gg_planman.check();
+            identity             |  state  |               reason                
+---------------------------------+---------+-------------------------------------
+ schema:pg_temp.bn_tmp oid:79379 | valid   | 
+ name:bn_stage oid:79379         | valid   | 
+ oid:79406 oid:79379             | invalid | table public.bn_stage was recreated
+
+=== 7. by_regex: a row registered over data_2026 serves data_2025 as well ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM data_2026 d WHERE d.v < 5', 'SeqScan(d)', by_regex => '{^public\\.data_}');
+ id  |       key_base       | key_oid |                    slots                    
+-----+----------------------+---------+---------------------------------------------
+ 463 | -4353004568003456152 |         | {"public.data_2026=regex(^public\\.data_)"}
+
+SELECT key_oid, relnames, rules, patterns FROM gg_planman.plans WHERE 'data_2026' = ANY(relnames);
+ key_oid |  relnames   |  rules  |      patterns       
+---------+-------------+---------+---------------------
+         | {data_2026} | {regex} | {"^public\\.data_"}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM data_2025 d WHERE d.v < 9;
+psql:26_by_name_regex.sql:81: NOTICE:  gg_planman: applying hints "SeqScan(d)" id=463 key_base=-4353004568003456152 key_oid=-1819692227193238326
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on data_2025 d
+                     Filter: (v < 9)
+ Optimizer: GPORCA
+
+EXPLAIN (COSTS off) SELECT count(*) FROM data_2026 d WHERE d.v < 9;
+psql:26_by_name_regex.sql:82: NOTICE:  gg_planman: applying hints "SeqScan(d)" id=463 key_base=-4353004568003456152 key_oid=-1819692227193238323
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on data_2026 d
+                     Filter: (v < 9)
+ Optimizer: GPORCA
+
+=== 8. the most specific row wins: the exact name of data_2026 beats the pattern, and a row by OID beats both ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM data_2026 d WHERE d.v < 5', 'IndexScan(d data_2026_v_idx)', by_name => '{data_2026}');
+ id  |       key_base       | key_oid |          slots          
+-----+----------------------+---------+-------------------------
+ 464 | -4353004568003456152 |         | {public.data_2026=name}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM data_2026 d WHERE d.v < 9;
+psql:26_by_name_regex.sql:86: NOTICE:  gg_planman: applying hints "IndexScan(d data_2026_v_idx)" id=464 key_base=-4353004568003456152 key_oid=-1819692227193238323
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Index Scan using data_2026_v_idx on data_2026 d
+                     Index Cond: (v < 9)
+ Optimizer: GPORCA
+
+EXPLAIN (COSTS off) SELECT count(*) FROM data_2025 d WHERE d.v < 9;
+psql:26_by_name_regex.sql:87: NOTICE:  gg_planman: applying hints "SeqScan(d)" id=463 key_base=-4353004568003456152 key_oid=-1819692227193238326
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on data_2025 d
+                     Filter: (v < 9)
+ Optimizer: GPORCA
+
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM data_2026 d WHERE d.v < 5', 'BitmapScan(d data_2026_v_idx)');
+ id  |       key_base       |       key_oid        |         slots          
+-----+----------------------+----------------------+------------------------
+ 465 | -4353004568003456152 | -1819692227193238323 | {public.data_2026=oid}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM data_2026 d WHERE d.v < 9;
+psql:26_by_name_regex.sql:89: NOTICE:  gg_planman: applying hints "BitmapScan(d data_2026_v_idx)" id=465 key_base=-4353004568003456152 key_oid=-1819692227193238323
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Bitmap Heap Scan on data_2026 d
+                     Recheck Cond: (v < 9)
+                     ->  Bitmap Index Scan on data_2026_v_idx
+                           Index Cond: (v < 9)
+ Optimizer: Postgres-based planner
+
+SELECT key_oid IS NOT NULL AS by_oid, hints, rules, n_oid, n_name, n_regex FROM gg_planman.plans WHERE 'data_2026' = ANY(relnames) ORDER BY created_at;
+ by_oid |             hints             |  rules  | n_oid | n_name | n_regex 
+--------+-------------------------------+---------+-------+--------+---------
+ f      | SeqScan(d)                    | {regex} |     0 |      0 |       1
+ f      | IndexScan(d data_2026_v_idx)  | {name}  |     0 |      1 |       0
+ t      | BitmapScan(d data_2026_v_idx) | {oid}   |     1 |      0 |       0
+
+=== 9. a selector in by_name and a pattern in by_regex on one query: what the row keeps ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM data_2026 d JOIN bn_dim m ON m.id = d.id JOIN bn_tmp t ON t.id = d.id WHERE d.v < 5', 'Leading((t (d m))) HashJoin(d m) SeqScan(t)', by_name => '{~^pg_temp\\.}', by_regex => '{^public\\.data_}');
+ id  |       key_base       | key_oid |                                          slots                                           
+-----+----------------------+---------+------------------------------------------------------------------------------------------
+ 466 | -1096119743559110075 |         | {"public.data_2026=regex(^public\\.data_)",public.bn_dim=oid,pg_temp.bn_tmp=schema.name}
+
+SELECT key_oid, relschemas, relnames, reloids::text, rules, patterns, n_oid, n_name, n_regex, identity, by_name, by_regex FROM gg_planman.plans WHERE 'bn_tmp' = ANY(relnames) AND 'data_2026' = ANY(relnames);
+ key_oid |       relschemas        |         relnames          |      reloids       |          rules          |           patterns            | n_oid | n_name | n_regex |                       identity                       |     by_name      |      by_regex       
+---------+-------------------------+---------------------------+--------------------+-------------------------+-------------------------------+-------+--------+---------+------------------------------------------------------+------------------+---------------------
+         | {public,public,pg_temp} | {data_2026,bn_dim,bn_tmp} | {79388,79379,NULL} | {regex,oid,schema.name} | {"^public\\.data_",NULL,NULL} |     1 |      1 |       1 | regex:^public\.data_ oid:79379 schema:pg_temp.bn_tmp | {"~^pg_temp\\."} | {"^public\\.data_"}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM data_2025 d JOIN bn_dim m ON m.id = d.id JOIN bn_tmp t ON t.id = d.id WHERE d.v < 9;
+psql:26_by_name_regex.sql:95: NOTICE:  gg_planman: applying hints "Leading((t (d m))) HashJoin(d m) SeqScan(t)" id=466 key_base=-1096119743559110075 key_oid=-
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: ((t.id = d.id) AND (t.id = m.id))
+                     ->  Seq Scan on bn_tmp t
+                     ->  Hash
+                           ->  Hash Join
+                                 Hash Cond: (d.id = m.id)
+                                 ->  Index Scan using data_2025_v_idx on data_2025 d
+                                       Index Cond: (v < 9)
+                                 ->  Hash
+                                       ->  Seq Scan on bn_dim m
+ Optimizer: GPORCA
+
+=== 10. the slot by OID of that row: bn_dim is recreated, the check marks the row, and the regeneration keeps by_name and by_regex ===
+CREATE TABLE bn_dim_new AS SELECT * FROM bn_dim DISTRIBUTED BY (id);
+SELECT 50000
+DROP TABLE bn_dim;
+DROP TABLE
+ALTER TABLE bn_dim_new RENAME TO bn_dim;
+ALTER TABLE
+ANALYZE bn_dim;
+ANALYZE
+SELECT identity, state, reason FROM gg_planman.check();
+                       identity                       |  state  |               reason                
+------------------------------------------------------+---------+-------------------------------------
+ schema:pg_temp.bn_tmp oid:79379                      | invalid | table public.bn_dim was recreated
+ name:bn_stage oid:79379                              | invalid | table public.bn_dim was recreated
+ oid:79406 oid:79379                                  | invalid | table public.bn_stage was recreated
+ regex:^public\.data_                                 | valid   | 
+ name:data_2026                                       | valid   | 
+ oid:79388                                            | valid   | 
+ regex:^public\.data_ oid:79379 schema:pg_temp.bn_tmp | invalid | table public.bn_dim was recreated
+
+EXPLAIN (COSTS off) SELECT count(*) FROM data_2025 d JOIN bn_dim m ON m.id = d.id JOIN bn_tmp t ON t.id = d.id WHERE d.v < 9;
+psql:26_by_name_regex.sql:103: NOTICE:  gg_planman: stored hints not applied id=466: table public.bn_dim was recreated, run gg_planman.check(regenerate => true) key_base=-1096119743559110075 key_oid=-
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t.id = d.id)
+                     ->  Seq Scan on bn_tmp t
+                     ->  Hash
+                           ->  Hash Join
+                                 Hash Cond: (m.id = d.id)
+                                 ->  Seq Scan on bn_dim m
+                                 ->  Hash
+                                       ->  Index Scan using data_2025_v_idx on data_2025 d
+                                             Index Cond: (v < 9)
+ Optimizer: GPORCA
+
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+                       identity                       |    state    |               reason                
+------------------------------------------------------+-------------+-------------------------------------
+ schema:pg_temp.bn_tmp oid:79379                      | regenerated | table public.bn_dim was recreated
+ name:bn_stage oid:79379                              | regenerated | table public.bn_dim was recreated
+ oid:79406 oid:79379                                  | regenerated | table public.bn_stage was recreated
+ regex:^public\.data_                                 | valid       | 
+ name:data_2026                                       | valid       | 
+ oid:79388                                            | valid       | 
+ regex:^public\.data_ oid:79379 schema:pg_temp.bn_tmp | regenerated | table public.bn_dim was recreated
+
+SELECT hints, rules, by_name, by_regex FROM gg_planman.plans WHERE 'bn_tmp' = ANY(relnames) AND 'data_2026' = ANY(relnames);
+                    hints                    |          rules          |     by_name      |      by_regex       
+---------------------------------------------+-------------------------+------------------+---------------------
+ Leading((t (d m))) HashJoin(d m) SeqScan(t) | {regex,oid,schema.name} | {"~^pg_temp\\."} | {"^public\\.data_"}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM data_2025 d JOIN bn_dim m ON m.id = d.id JOIN bn_tmp t ON t.id = d.id WHERE d.v < 9;
+psql:26_by_name_regex.sql:106: NOTICE:  gg_planman: applying hints "Leading((t (d m))) HashJoin(d m) SeqScan(t)" id=466 key_base=-1096119743559110075 key_oid=-
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: ((t.id = d.id) AND (t.id = m.id))
+                     ->  Seq Scan on bn_tmp t
+                     ->  Hash
+                           ->  Hash Join
+                                 Hash Cond: (d.id = m.id)
+                                 ->  Index Scan using data_2025_v_idx on data_2025 d
+                                       Index Cond: (v < 9)
+                                 ->  Hash
+                                       ->  Seq Scan on bn_dim m
+ Optimizer: GPORCA
+
+=== 11. capture from a hint comment stores a query over a temporary table by schema and name ===
+CREATE TEMP TABLE bn_tmp2 AS SELECT * FROM bn_dim WHERE v < 100 DISTRIBUTED BY (id);
+SELECT 5000
+SET gg_planman.write_mode = on;
+SET
+/*+ SeqScan(bn_tmp2) */ SELECT count(*) FROM bn_tmp2 WHERE v < 5;
+psql:26_by_name_regex.sql:111: NOTICE:  gg_planman: stored hints "SeqScan(bn_tmp2)" id=467 key_base=-8243021052587111000 key_oid=-
+ count 
+-------
+   250
+
+SET gg_planman.write_mode = off;
+SET
+SELECT hints, rules, by_name, key_oid FROM gg_planman.plans WHERE 'bn_tmp2' = ANY(relnames);
+      hints       |     rules     |     by_name      | key_oid 
+------------------+---------------+------------------+---------
+ SeqScan(bn_tmp2) | {schema.name} | {"~^pg_temp\\."} |        
+
+=== 12. the DBA switches a row off by its id, found through identity ===
+SELECT id, identity, enabled FROM gg_planman.plans WHERE 'data_2026' = ANY(relnames) ORDER BY created_at;
+ id  |                       identity                       | enabled 
+-----+------------------------------------------------------+---------
+ 463 | regex:^public\.data_                                 | t
+ 464 | name:data_2026                                       | t
+ 465 | oid:79388                                            | t
+ 466 | regex:^public\.data_ oid:79414 schema:pg_temp.bn_tmp | t
+
+UPDATE gg_planman.plans SET enabled = false WHERE id = (SELECT id FROM gg_planman.plans WHERE identity = 'regex:^public\.data_');
+UPDATE 1
+SELECT id, enabled, hints, rules FROM gg_planman.plans WHERE 'data_2026' = ANY(relnames) ORDER BY created_at;
+ id  | enabled |                    hints                    |          rules          
+-----+---------+---------------------------------------------+-------------------------
+ 463 | f       | SeqScan(d)                                  | {regex}
+ 464 | t       | IndexScan(d data_2026_v_idx)                | {name}
+ 465 | t       | BitmapScan(d data_2026_v_idx)               | {oid}
+ 466 | t       | Leading((t (d m))) HashJoin(d m) SeqScan(t) | {regex,oid,schema.name}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM data_2025 d WHERE d.v < 9;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Index Scan using data_2025_v_idx on data_2025 d
+                     Index Cond: (v < 9)
+ Optimizer: GPORCA
+
+=== 13. a table matched by name is recreated with another column order: key_base changes and nothing reports it ===
+CREATE TABLE bn_stage_new AS SELECT v, id FROM bn_stage DISTRIBUTED BY (id);
+SELECT 50000
+DROP TABLE bn_stage;
+DROP TABLE
+ALTER TABLE bn_stage_new RENAME TO bn_stage;
+ALTER TABLE
+CREATE INDEX bn_stage_v_idx ON bn_stage (v);
+CREATE INDEX
+ANALYZE bn_stage;
+ANALYZE
+SELECT hints, rules FROM gg_planman.plans WHERE 'bn_stage' = ANY(relnames) ORDER BY created_at;
+            hints            |   rules    
+-----------------------------+------------
+ SeqScan(s)                  | {name,oid}
+ IndexScan(s bn_stage_v_idx) | {oid,oid}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM bn_stage s JOIN bn_dim d ON d.id = s.id WHERE s.v < 9;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (d.id = s.id)
+                     ->  Seq Scan on bn_dim d
+                     ->  Hash
+                           ->  Index Scan using bn_stage_v_idx on bn_stage s
+                                 Index Cond: (v < 9)
+ Optimizer: GPORCA
+
+DROP TABLE bn_dim, bn_stage, data_2025, data_2026;
+TRUNCATE gg_planman.plans;

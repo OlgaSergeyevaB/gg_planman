@@ -1,0 +1,130 @@
+SET optimizer = on;
+SET
+SET gg_planman.log_usage = notice;
+SET
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+=== ORCA, no hints ===
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: t2.t1_id
+                           ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+ Optimizer: GPORCA
+(12 rows)
+
+=== join method NestLoop ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'NestLoop(t1 t2)');
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 121 | 1110863247016496802 | 5516559490127072749 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:09_orca_coverage.sql:9: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2)" id=121 key_base=1110863247016496802 key_oid=5516559490127072749
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: t2.t1_id
+                           ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+ Optimizer: GPORCA
+(12 rows)
+
+=== scan method SeqScan(t1) ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'SeqScan(t1)');
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 121 | 1110863247016496802 | 5516559490127072749 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:09_orca_coverage.sql:12: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=121 key_base=1110863247016496802 key_oid=5516559490127072749
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: t2.t1_id
+                           ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Seq Scan on t1
+                                 Filter: (v < 500)
+ Optimizer: GPORCA
+(12 rows)
+
+=== join order Leading((t2 t1)) ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'Leading((t2 t1))');
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 121 | 1110863247016496802 | 5516559490127072749 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:09_orca_coverage.sql:15: NOTICE:  gg_planman: applying hints "Leading((t2 t1))" id=121 key_base=1110863247016496802 key_oid=5516559490127072749
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: t2.t1_id
+                           ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+ Optimizer: GPORCA
+(12 rows)
+
+=== Set(optimizer off) with NestLoop: planned by the Postgres planner ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'Set(optimizer off) NestLoop(t1 t2) Leading((t1 t2))');
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 121 | 1110863247016496802 | 5516559490127072749 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:09_orca_coverage.sql:18: NOTICE:  gg_planman: applying hints "Set(optimizer off) NestLoop(t1 t2) Leading((t1 t2))" id=121 key_base=1110863247016496802 key_oid=5516559490127072749
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Bitmap Heap Scan on t1
+                                 Recheck Cond: (v < 500)
+                                 ->  Bitmap Index Scan on t1_v_idx
+                                       Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+SHOW optimizer;
+ optimizer 
+-----------
+ on
+(1 row)
+

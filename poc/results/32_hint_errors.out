@@ -1,0 +1,81 @@
+SET optimizer = off;
+SET
+SET client_min_messages = notice;
+SET
+SET gg_planman.log_usage = notice;
+SET
+BEGIN;
+BEGIN
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 WHERE v < 1', 'IndexScan(t1 t1_no_such_idx)');
+ id  |      key_base       |       key_oid       |      slots      
+-----+---------------------+---------------------+-----------------
+ 381 | 7946274825557884719 | 8681625411466649343 | {public.t1=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < 5;
+psql:32_hint_errors.sql:17: NOTICE:  gg_planman: applying hints "IndexScan(t1 t1_no_such_idx)" id=381 key_base=7946274825557884719 key_oid=8681625411466649343
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 5)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+SET LOCAL pg_hint_plan.debug_print = on;
+SET
+SET LOCAL pg_hint_plan.message_level = notice;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < 5;
+psql:32_hint_errors.sql:21: NOTICE:  gg_planman: applying hints "IndexScan(t1 t1_no_such_idx)" id=381 key_base=7946274825557884719 key_oid=8681625411466649343
+psql:32_hint_errors.sql:21: NOTICE:  available indexes for IndexScan(t1):
+psql:32_hint_errors.sql:21: NOTICE:  pg_hint_plan:
+used hint:
+IndexScan(t1 t1_no_such_idx)
+not used hint:
+duplication hint:
+error hint:
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 5)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+ROLLBACK;
+ROLLBACK
+BEGIN;
+BEGIN
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 WHERE v < 1', 'IndexScan(t1 t1_v_idx) BogusHint(t1)');
+ id  |      key_base       |       key_oid       |      slots      
+-----+---------------------+---------------------+-----------------
+ 382 | 7946274825557884719 | 8681625411466649343 | {public.t1=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < 5;
+psql:32_hint_errors.sql:28: NOTICE:  gg_planman: applying hints "IndexScan(t1 t1_v_idx) BogusHint(t1)" id=382 key_base=7946274825557884719 key_oid=8681625411466649343
+psql:32_hint_errors.sql:28: INFO:  pg_hint_plan: hint syntax error at or near "BogusHint(t1) "
+DETAIL:  Unrecognized hint keyword "BogusHint".
+                    QUERY PLAN                     
+---------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Index Scan using t1_v_idx on t1
+                     Index Cond: (v < 5)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+ROLLBACK;
+ROLLBACK
+SELECT count(*) AS bogus_rows FROM gg_planman.plans WHERE hints LIKE '%no_such%' OR hints LIKE '%Bogus%';
+ bogus_rows 
+------------
+          0
+(1 row)
+

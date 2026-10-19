@@ -1,0 +1,59 @@
+SET gg_planman.log_usage = notice;
+SET
+SET optimizer = on;
+SET
+SET optimizer_trace_fallback = on;
+SET
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+=== query that ORCA cannot plan: TABLESAMPLE ===
+SET gg_planman.enabled = off;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 TABLESAMPLE SYSTEM (50) JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:12_fallback.sql:7: INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: TABLESAMPLE in the FROM clause
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Sample Scan on t1
+                                       Sampling: system ('50'::real)
+                                       Filter: (v < 500)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+SET gg_planman.enabled = on;
+SET
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 TABLESAMPLE SYSTEM (50) JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'NestLoop(t1 t2) Leading((t1 t2))');
+psql:12_fallback.sql:9: INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: SIRV functions
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 201 | 2622005450668843049 | 1732494622843396646 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 TABLESAMPLE SYSTEM (50) JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:12_fallback.sql:10: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=201 key_base=2622005450668843049 key_oid=1732494622843396646
+psql:12_fallback.sql:10: INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
+DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: TABLESAMPLE in the FROM clause
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Sample Scan on t1
+                                 Sampling: system ('50'::real)
+                                 Filter: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(11 rows)
+

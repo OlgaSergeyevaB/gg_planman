@@ -1,0 +1,136 @@
+SET client_min_messages = warning;
+DROP FUNCTION IF EXISTS oh_cnt(int);
+DROP FUNCTION IF EXISTS oh_cnt_hinted(int);
+TRUNCATE gg_planman.plans;
+RESET client_min_messages;
+SET gg_planman.log_usage = notice;
+SET
+SET optimizer = off;
+SET
+=== 1. stored hints, the query sent without a comment ===
+SELECT gg_planman.register_hints('SELECT count(*) FROM t1 WHERE v < 1', 'SeqScan(t1)') IS NOT NULL AS registered;
+ registered 
+------------
+ t
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < 100;
+psql:29_own_hints.sql:20: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=341 key_base=7946274825557884719 key_oid=8681625411466649343
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 100)
+ Optimizer: Postgres-based planner
+
+=== 2. the same query sent with hints of its own: they are applied, the stored ones are not ===
+/*+ IndexScan(t1 t1_v_idx) */ EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < 100;
+psql:29_own_hints.sql:23: NOTICE:  gg_planman: hints of the query text applied, stored hints not used id=341 key_base=7946274825557884719 key_oid=8681625411466649343
+                    QUERY PLAN                     
+---------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Index Scan using t1_v_idx on t1
+                     Index Cond: (v < 100)
+ Optimizer: Postgres-based planner
+
+--- the stored row is untouched, and the query sent without a comment uses it again
+SELECT hints, enabled FROM gg_planman.plans;
+    hints    | enabled 
+-------------+---------
+ SeqScan(t1) | t
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < 100;
+psql:29_own_hints.sql:26: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=341 key_base=7946274825557884719 key_oid=8681625411466649343
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 100)
+ Optimizer: Postgres-based planner
+
+=== 3. the rows are the same either way ===
+SELECT count(*) FROM t1 WHERE v < 100;
+psql:29_own_hints.sql:29: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=341 key_base=7946274825557884719 key_oid=8681625411466649343
+ count 
+-------
+  2000
+
+/*+ IndexScan(t1 t1_v_idx) */ SELECT count(*) FROM t1 WHERE v < 100;
+psql:29_own_hints.sql:30: NOTICE:  gg_planman: hints of the query text applied, stored hints not used id=341 key_base=7946274825557884719 key_oid=8681625411466649343
+ count 
+-------
+  2000
+
+=== 4. with write mode on, the hints of the comment are applied and replace the stored ones ===
+SET gg_planman.write_mode = on;
+SET
+/*+ IndexScan(t1 t1_v_idx) */ SELECT count(*) FROM t1 WHERE v < 7;
+psql:29_own_hints.sql:34: NOTICE:  gg_planman: stored hints "IndexScan(t1 t1_v_idx)" id=341 key_base=7946274825557884719 key_oid=8681625411466649343
+ count 
+-------
+   140
+
+SET gg_planman.write_mode = off;
+SET
+SELECT hints FROM gg_planman.plans ORDER BY created_at;
+         hints          
+------------------------
+ IndexScan(t1 t1_v_idx)
+
+=== 5. a hinted call of a function does not switch off the hints stored for the query inside it ===
+SELECT gg_planman.register_hints('SELECT count(*) FROM t1 WHERE v < $1', 'SeqScan(t1)', '{int4}') IS NOT NULL AS registered;
+ registered 
+------------
+ t
+
+CREATE FUNCTION oh_cnt(x int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE r bigint;
+BEGIN
+  SELECT count(*) INTO r FROM t1 WHERE v < x;
+  RETURN r;
+END $$;
+CREATE FUNCTION
+/*+ IndexScan(t1 t1_v_idx) */ SELECT oh_cnt(100);
+psql:29_own_hints.sql:46: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=342 key_base=5764211329137699756 key_oid=8844618479730760581
+ oh_cnt 
+--------
+   2000
+
+=== 6. limit of the PoC: hints written inside a function body lose to the stored ones ===
+CREATE FUNCTION oh_cnt_hinted(x int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE r bigint;
+BEGIN
+  SELECT /*+ IndexScan(t1 t1_v_idx) */ count(*) INTO r FROM t1 WHERE v < x;
+  RETURN r;
+END $$;
+CREATE FUNCTION
+SELECT oh_cnt_hinted(100);
+psql:29_own_hints.sql:55: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=342 key_base=5764211329137699756 key_oid=8844618479730760581
+ oh_cnt_hinted 
+---------------
+          2000
+
+=== 7. limit of the PoC: hints written in the text of PREPARE lose to the stored ones at EXECUTE ===
+PREPARE oh_p(int) AS /*+ IndexScan(t1 t1_v_idx) */ SELECT count(*) FROM t1 WHERE v < $1;
+PREPARE
+EXPLAIN (COSTS off) EXECUTE oh_p(100);
+psql:29_own_hints.sql:59: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=342 key_base=5764211329137699756 key_oid=8844618479730760581
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 100)
+ Optimizer: Postgres-based planner
+
+DEALLOCATE oh_p;
+DEALLOCATE
+DROP FUNCTION oh_cnt(int);
+DROP FUNCTION oh_cnt_hinted(int);
+TRUNCATE gg_planman.plans;

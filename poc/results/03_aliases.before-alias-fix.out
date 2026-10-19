@@ -1,0 +1,37 @@
+SET optimizer = off;
+SET
+SET sr_plan.log_usage = notice;
+SET
+SET pg_hint_plan.debug_print = on;
+SET
+SET client_min_messages = log;
+SET
+=== stored hints mention t1 t2; query uses aliases a b ===
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 a JOIN t2 b ON a.id = b.t1_id WHERE a.v < 500;
+psql:03_aliases.sql:7: LOG:  statement: EXPLAIN (COSTS off) SELECT count(*) FROM t1 a JOIN t2 b ON a.id = b.t1_id WHERE a.v < 500;
+psql:03_aliases.sql:7: NOTICE:  sr_plan: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" name_hash=-2282368155202536457
+psql:03_aliases.sql:7: LOG:  pg_hint_plan:
+used hint:
+not used hint:
+IndexScan(t1 t1_v_idx)
+NestLoop(t1 t2)
+Leading((t1 t2))
+duplication hint:
+error hint:
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (b.t1_id = a.id)
+                     ->  Seq Scan on t2 b
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1 a
+                                       Recheck Cond: (v < 500)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 500)
+ Optimizer: Postgres-based planner
+(13 rows)
+

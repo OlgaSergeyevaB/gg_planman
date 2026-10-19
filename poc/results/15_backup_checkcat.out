@@ -1,0 +1,46 @@
+=== register hints in srpoc ===
+TRUNCATE TABLE
+      key_base       |       key_oid       |             slots             
+---------------------+---------------------+-------------------------------
+ 1110863247016496802 | 7912474491888176930 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+ hint_rows 
+-----------
+         1
+(1 row)
+
+=== pg_dump / pg_restore into srpoc_restored ===
+dump ok: 5846170 bytes
+NOTICE:  database "srpoc_restored" does not exist, skipping
+DROP DATABASE
+CREATE DATABASE
+=== restored database ===
+ hint_rows 
+-----------
+         0
+(1 row)
+
+ localoid | policytype | numsegments 
+----------+------------+-------------
+(0 rows)
+
+SET
+SET
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Seq Scan on t1
+                                       Filter: (v < 500)
+ Optimizer: Postgres-based planner
+(11 rows)
+
+=== pg_dump --data-only for gg_planman.plans ===
+rows with hints in data-only dump: 0

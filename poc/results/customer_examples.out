@@ -1,0 +1,354 @@
+SET client_min_messages = warning;
+DROP TABLE IF EXISTS customers, orders, orders_new CASCADE;
+CREATE TABLE customers (id int, region text, name text) DISTRIBUTED BY (id);
+CREATE TABLE orders (id int, customer_id int, amount numeric, order_date date) DISTRIBUTED BY (id);
+INSERT INTO customers SELECT i, (ARRAY['North','South','East','West'])[1 + i % 4], 'customer ' || i FROM generate_series(1, 50000) i;
+INSERT INTO orders SELECT i, 1 + i % 50000, (i % 1000)::numeric, date '2026-01-01' + (i % 270) FROM generate_series(1, 300000) i;
+CREATE INDEX orders_customer_id_idx ON orders (customer_id);
+CREATE INDEX orders_order_date_idx ON orders (order_date);
+ANALYZE customers;
+ANALYZE orders;
+TRUNCATE gg_planman.plans;
+RESET client_min_messages;
+SET gg_planman.log_usage = notice;
+SET
+=== 1.1 store hints from the query text ===
+SELECT * FROM gg_planman.register_hints($q$
+    SELECT c.region, sum(o.amount)
+      FROM customers c JOIN orders o ON o.customer_id = c.id
+     WHERE o.order_date >= '2026-09-20'
+     GROUP BY c.region
+$q$, 'SeqScan(o)');
+ id  |      key_base      |       key_oid        |                  slots                   
+-----+--------------------+----------------------+------------------------------------------
+ 401 | 894544969009701481 | -8587278725138966896 | {public.customers=oid,public.orders=oid}
+
+=== 1.2 the application sends the query with another date ===
+EXPLAIN (COSTS off)
+SELECT c.region, sum(o.amount)
+  FROM customers c JOIN orders o ON o.customer_id = c.id
+ WHERE o.order_date >= '2026-08-01'
+ GROUP BY c.region;
+psql:customer_examples.sql:33: NOTICE:  gg_planman: applying hints "SeqScan(o)" id=401 key_base=894544969009701481 key_oid=-8587278725138966896
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Finalize HashAggregate
+         Group Key: c.region
+         ->  Redistribute Motion 3:3  (slice2; segments: 3)
+               Hash Key: c.region
+               ->  Streaming Partial HashAggregate
+                     Group Key: c.region
+                     ->  Hash Join
+                           Hash Cond: (o.customer_id = c.id)
+                           ->  Redistribute Motion 3:3  (slice3; segments: 3)
+                                 Hash Key: o.customer_id
+                                 ->  Seq Scan on orders o
+                                       Filter: (order_date >= '2026-08-01'::date)
+                           ->  Hash
+                                 ->  Seq Scan on customers c
+ Optimizer: GPORCA
+
+=== 1.3 the same by running the query once with a hint comment ===
+SET gg_planman.write_mode = on;
+SET
+/*+ SeqScan(o) */
+SELECT c.region, sum(o.amount)
+  FROM customers c JOIN orders o ON o.customer_id = c.id
+ WHERE o.order_date >= '2026-09-20'
+ GROUP BY c.region;
+psql:customer_examples.sql:41: NOTICE:  gg_planman: stored hints unchanged id=401 key_base=894544969009701481 key_oid=-8587278725138966896
+ region |   sum   
+--------+---------
+ North  | 1113750
+ South  | 1111532
+ West   | 1111528
+ East   | 1113754
+
+SET gg_planman.write_mode = off;
+SET
+=== 1.4 a query the application sends with a parameter ===
+SELECT * FROM gg_planman.register_hints($q$
+    SELECT c.region, sum(o.amount)
+      FROM customers c JOIN orders o ON o.customer_id = c.id
+     WHERE o.order_date >= $1
+     GROUP BY c.region
+$q$, 'SeqScan(o)', '{date}');
+ id  |      key_base       |       key_oid       |                  slots                   
+-----+---------------------+---------------------+------------------------------------------
+ 402 | 5610502409494911065 | 8726879772381161908 | {public.customers=oid,public.orders=oid}
+
+PREPARE report(date) AS
+    SELECT c.region, sum(o.amount)
+      FROM customers c JOIN orders o ON o.customer_id = c.id
+     WHERE o.order_date >= $1
+     GROUP BY c.region;
+PREPARE
+EXPLAIN (COSTS off) EXECUTE report('2026-08-01');
+psql:customer_examples.sql:56: NOTICE:  gg_planman: applying hints "SeqScan(o)" id=402 key_base=5610502409494911065 key_oid=8726879772381161908
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Finalize HashAggregate
+         Group Key: c.region
+         ->  Redistribute Motion 3:3  (slice2; segments: 3)
+               Hash Key: c.region
+               ->  Streaming Partial HashAggregate
+                     Group Key: c.region
+                     ->  Hash Join
+                           Hash Cond: (o.customer_id = c.id)
+                           ->  Redistribute Motion 3:3  (slice3; segments: 3)
+                                 Hash Key: o.customer_id
+                                 ->  Seq Scan on orders o
+                                       Filter: (order_date >= '2026-08-01'::date)
+                           ->  Hash
+                                 ->  Seq Scan on customers c
+ Optimizer: GPORCA
+
+DEALLOCATE report;
+DEALLOCATE
+=== 1.5 what is stored ===
+SELECT enabled, hints, paramtypes, relnames FROM gg_planman.plans ORDER BY created_at;
+ enabled |   hints    | paramtypes |      relnames      
+---------+------------+------------+--------------------
+ t       | SeqScan(o) |            | {customers,orders}
+ t       | SeqScan(o) | {date}     | {customers,orders}
+
+=== 1.6 a join method: the query goes to the Postgres planner ===
+SELECT * FROM gg_planman.register_hints($q$
+    SELECT c.region, sum(o.amount)
+      FROM customers c JOIN orders o ON o.customer_id = c.id
+     WHERE o.order_date >= '2026-09-20'
+     GROUP BY c.region
+$q$, 'Set(optimizer off) NestLoop(o c) Leading((o c))');
+ id  |      key_base      |       key_oid        |                  slots                   
+-----+--------------------+----------------------+------------------------------------------
+ 401 | 894544969009701481 | -8587278725138966896 | {public.customers=oid,public.orders=oid}
+
+EXPLAIN (COSTS off)
+SELECT c.region, sum(o.amount)
+  FROM customers c JOIN orders o ON o.customer_id = c.id
+ WHERE o.order_date >= '2026-08-01'
+ GROUP BY c.region;
+psql:customer_examples.sql:73: NOTICE:  gg_planman: applying hints "Set(optimizer off) NestLoop(o c) Leading((o c))" id=401 key_base=894544969009701481 key_oid=-8587278725138966896
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Finalize GroupAggregate
+   Group Key: c.region
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         Merge Key: c.region
+         ->  Partial GroupAggregate
+               Group Key: c.region
+               ->  Sort
+                     Sort Key: c.region
+                     ->  Nested Loop
+                           Join Filter: (c.id = o.customer_id)
+                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                                 Hash Key: o.customer_id
+                                 ->  Index Scan using orders_customer_id_idx on orders o
+                                       Filter: (order_date >= '2026-08-01'::date)
+                           ->  Materialize
+                                 ->  Seq Scan on customers c
+ Optimizer: Postgres-based planner
+
+=== 1.7 a load recreates the table ===
+CREATE TABLE orders_new (LIKE orders) DISTRIBUTED BY (id);
+CREATE TABLE
+INSERT INTO orders_new SELECT * FROM orders;
+INSERT 0 300000
+DROP TABLE orders;
+DROP TABLE
+ALTER TABLE orders_new RENAME TO orders;
+ALTER TABLE
+CREATE INDEX orders_customer_id_idx ON orders (customer_id);
+CREATE INDEX
+CREATE INDEX orders_order_date_idx ON orders (order_date);
+CREATE INDEX
+ANALYZE orders;
+ANALYZE
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |              reason               
+---------------------+---------+-----------------------------------
+ oid:79327 oid:79332 | invalid | table public.orders was recreated
+ oid:79327 oid:79332 | invalid | table public.orders was recreated
+
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+      identity       |    state    |              reason               
+---------------------+-------------+-----------------------------------
+ oid:79327 oid:79332 | regenerated | table public.orders was recreated
+ oid:79327 oid:79332 | regenerated | table public.orders was recreated
+
+SELECT hints, reloids::text FROM gg_planman.plans ORDER BY created_at;
+                      hints                      |    reloids    
+-------------------------------------------------+---------------
+ SeqScan(o)                                      | {79327,79339}
+ Set(optimizer off) NestLoop(o c) Leading((o c)) | {79327,79339}
+
+=== 1.8 switch stored hints off by the row id, and remove them ===
+SELECT id, enabled, left(query, 50) AS query FROM gg_planman.plans ORDER BY id;
+ id  | enabled |               query                
+-----+---------+------------------------------------
+ 401 | t       |                                   +
+     |         |     SELECT c.region, sum(o.amount)+
+     |         |       FROM cus
+ 402 | t       |                                   +
+     |         |     SELECT c.region, sum(o.amount)+
+     |         |       FROM cus
+
+UPDATE gg_planman.plans SET enabled = false WHERE id IN (SELECT id FROM gg_planman.plans WHERE query LIKE '%sum(o.amount)%');
+UPDATE 2
+SELECT id, enabled FROM gg_planman.plans ORDER BY id;
+ id  | enabled 
+-----+---------
+ 401 | f
+ 402 | f
+
+DELETE FROM gg_planman.plans WHERE NOT enabled;
+DELETE 2
+=== 2. temporary table: register in one session ===
+CREATE TEMP TABLE stage_orders AS
+    SELECT * FROM orders WHERE order_date >= '2026-09-01' DISTRIBUTED BY (id);
+SELECT 29997
+CREATE INDEX stage_orders_amount_idx ON stage_orders (amount);
+CREATE INDEX
+ANALYZE stage_orders;
+ANALYZE
+SELECT * FROM gg_planman.register_hints($q$
+    SELECT count(*) FROM stage_orders s JOIN customers c ON c.id = s.customer_id WHERE s.amount > 990
+$q$, 'SeqScan(s)', by_name => '{pg_temp.stage_orders}');
+ id  |       key_base       | key_oid |                          slots                          
+-----+----------------------+---------+---------------------------------------------------------
+ 403 | -4766407816293332300 |         | {pg_temp.stage_orders=schema.name,public.customers=oid}
+
+=== 2. ... and use in another session with its own temporary table ===
+You are now connected to database "srpoc" as user "olga".
+SET gg_planman.log_usage = notice;
+SET
+CREATE TEMP TABLE stage_orders AS
+    SELECT * FROM orders WHERE order_date >= '2026-09-10' DISTRIBUTED BY (id);
+SELECT 19998
+CREATE INDEX stage_orders_amount_idx ON stage_orders (amount);
+CREATE INDEX
+ANALYZE stage_orders;
+ANALYZE
+EXPLAIN (COSTS off)
+SELECT count(*) FROM stage_orders s JOIN customers c ON c.id = s.customer_id WHERE s.amount > 995;
+psql:customer_examples.sql:109: NOTICE:  gg_planman: applying hints "SeqScan(s)" id=403 key_base=-4766407816293332300 key_oid=-
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (c.id = s.customer_id)
+                     ->  Seq Scan on customers c
+                     ->  Hash
+                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                                 Hash Key: s.customer_id
+                                 ->  Seq Scan on stage_orders s
+                                       Filter: (amount > '995'::numeric)
+ Optimizer: GPORCA
+
+=== 3.1 does the plan name segments? ===
+SELECT optimizer, direct_dispatch, segments
+  FROM gg_planman.plan_info('SELECT name FROM customers WHERE id = 42');
+ optimizer | direct_dispatch | segments 
+-----------+-----------------+----------
+ GPORCA    | t               | {0}
+
+SELECT optimizer, direct_dispatch, segments
+  FROM gg_planman.plan_info('SELECT count(*) FROM orders WHERE amount > 990');
+ optimizer | direct_dispatch | segments 
+-----------+-----------------+----------
+ GPORCA    | f               | {}
+
+=== 3.2 a table matched by name: the load recreates orders, and the hints stay in use without regeneration ===
+SELECT * FROM gg_planman.register_hints($q$
+    SELECT c.region, count(*)
+      FROM customers c JOIN orders o ON o.customer_id = c.id
+     WHERE o.order_date >= '2026-09-01' AND o.amount > 900
+     GROUP BY c.region
+$q$, 'SeqScan(o)', by_name => '{orders}');
+ id  |      key_base       | key_oid |                   slots                   
+-----+---------------------+---------+-------------------------------------------
+ 421 | 1536521606010585085 |         | {public.customers=oid,public.orders=name}
+
+CREATE TABLE orders_new (LIKE orders) DISTRIBUTED BY (id);
+CREATE TABLE
+INSERT INTO orders_new SELECT * FROM orders;
+INSERT 0 300000
+DROP TABLE orders;
+DROP TABLE
+ALTER TABLE orders_new RENAME TO orders;
+ALTER TABLE
+CREATE INDEX orders_customer_id_idx ON orders (customer_id);
+CREATE INDEX
+CREATE INDEX orders_order_date_idx ON orders (order_date);
+CREATE INDEX
+ANALYZE orders;
+ANALYZE
+SELECT hints, rules FROM gg_planman.plans WHERE rules @> ARRAY['name'] ORDER BY created_at;
+   hints    |   rules    
+------------+------------
+ SeqScan(o) | {oid,name}
+
+EXPLAIN (COSTS off)
+SELECT c.region, count(*)
+  FROM customers c JOIN orders o ON o.customer_id = c.id
+ WHERE o.order_date >= '2026-09-02' AND o.amount > 900
+ GROUP BY c.region;
+psql:customer_examples.sql:136: NOTICE:  gg_planman: applying hints "SeqScan(o)" id=421 key_base=1536521606010585085 key_oid=-6556977528910716802
+                                                       QUERY PLAN                                                       
+------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Finalize HashAggregate
+         Group Key: c.region
+         ->  Redistribute Motion 3:3  (slice2; segments: 3)
+               Hash Key: c.region
+               ->  Streaming Partial HashAggregate
+                     Group Key: c.region
+                     ->  Hash Join
+                           Hash Cond: (c.id = o.customer_id)
+                           ->  Seq Scan on customers c
+                           ->  Hash
+                                 ->  Redistribute Motion 3:3  (slice3; segments: 3)
+                                       Hash Key: o.customer_id
+                                       ->  Seq Scan on orders o
+                                             Filter: ((order_date >= '2026-09-02'::date) AND (amount > '900'::numeric))
+ Optimizer: GPORCA
+
+=== 3.3 tables matched by a regular expression: one row for every yearly table ===
+CREATE TABLE orders_2025 (LIKE orders) DISTRIBUTED BY (id);
+CREATE TABLE
+CREATE TABLE orders_2026 (LIKE orders) DISTRIBUTED BY (id);
+CREATE TABLE
+INSERT INTO orders_2025 SELECT * FROM orders WHERE id % 2 = 0;
+INSERT 0 150000
+INSERT INTO orders_2026 SELECT * FROM orders WHERE id % 2 = 1;
+INSERT 0 150000
+ANALYZE orders_2025;
+ANALYZE
+ANALYZE orders_2026;
+ANALYZE
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM orders_2026 o WHERE o.amount > 990', 'SeqScan(o)', by_regex => '{^public\\.orders_}');
+ id  |       key_base       | key_oid |                      slots                      
+-----+----------------------+---------+-------------------------------------------------
+ 422 | -8793004913317974248 |         | {"public.orders_2026=regex(^public\\.orders_)"}
+
+EXPLAIN (COSTS off) SELECT count(*) FROM orders_2025 o WHERE o.amount > 995;
+psql:customer_examples.sql:146: NOTICE:  gg_planman: applying hints "SeqScan(o)" id=422 key_base=-8793004913317974248 key_oid=-7686485334199936046
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on orders_2025 o
+                     Filter: (amount > '995'::numeric)
+ Optimizer: GPORCA
+
+SELECT rules, patterns FROM gg_planman.plans WHERE 'orders_2026' = ANY(relnames);
+  rules  |       patterns        
+---------+-----------------------
+ {regex} | {"^public\\.orders_"}
+
+DROP TABLE orders_2025, orders_2026;

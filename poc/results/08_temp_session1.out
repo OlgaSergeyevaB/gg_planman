@@ -1,0 +1,41 @@
+SET optimizer = off;
+SET
+SET gg_planman.log_usage = notice;
+SET
+CREATE TEMP TABLE tt AS SELECT * FROM t1 WHERE v < 2000 DISTRIBUTED BY (id);
+SELECT 40000
+CREATE INDEX tt_v_idx ON tt (v);
+CREATE INDEX
+ANALYZE tt;
+ANALYZE
+=== capture from a hint comment stores a temporary table by schema and name, with the selector kept in by_name ===
+SET gg_planman.write_mode = on;
+SET
+/*+ SeqScan(tt) */ SELECT count(*) FROM tt WHERE v = 10;
+psql:08_temp_session1.sql:9: NOTICE:  gg_planman: stored hints "SeqScan(tt)" id=241 key_base=-2662240520306124045 key_oid=-
+ count 
+-------
+    20
+(1 row)
+
+SET gg_planman.write_mode = off;
+SET
+SELECT hints, relschemas, relnames, rules, by_name, key_oid FROM gg_planman.plans WHERE 'tt' = ANY(relnames);
+    hints    | relschemas | relnames |     rules     |     by_name      | key_oid 
+-------------+------------+----------+---------------+------------------+---------
+ SeqScan(tt) | {pg_temp}  | {tt}     | {schema.name} | {"~^pg_temp\\."} |        
+(1 row)
+
+=== an explicit registration with the table in by_name replaces the captured row: same key_base, same rules ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM tt WHERE v = 10', 'SeqScan(tt)', by_name => '{pg_temp.tt}');
+ id  |       key_base       | key_oid |          slots           
+-----+----------------------+---------+--------------------------
+ 241 | -2662240520306124045 |         | {pg_temp.tt=schema.name}
+(1 row)
+
+SELECT hints, relschemas, relnames, rules, key_oid FROM gg_planman.plans WHERE 'tt' = ANY(relnames);
+    hints    | relschemas | relnames |     rules     | key_oid 
+-------------+------------+----------+---------------+---------
+ SeqScan(tt) | {pg_temp}  | {tt}     | {schema.name} |        
+(1 row)
+

@@ -1,0 +1,6 @@
+Hints registered for: SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v = $1 (int4)
+Workload: pgbench -c 1 -t 8 -f bench_join.sql, optimizer = off, counts taken from the coordinator log
+
+pgbench -M simple   : sr_plan applied hints 0 times (literal constants give the literal-form key, see F5)
+pgbench -M extended : planner ran 1 time for 8 executions, sr_plan applied hints 1 time, pg_hint_plan logged NestLoop(t1 t2) as used
+pgbench -M prepared : planner ran 1 time for 8 executions, sr_plan applied hints 1 time, pg_hint_plan logged NestLoop(t1 t2) as used

@@ -1,0 +1,69 @@
+SET optimizer = off;
+SET
+SET sr_plan.log_usage = notice;
+SET
+LOAD 'auto_explain';
+LOAD
+SET auto_explain.log_min_duration = 0;
+SET
+SET auto_explain.log_nested_statements = on;
+SET
+SET auto_explain.log_analyze = off;
+SET
+SET client_min_messages = log;
+SET
+TRUNCATE sr_hints;
+psql:07_plpgsql.sql:9: LOG:  statement: TRUNCATE sr_hints;
+TRUNCATE TABLE
+SELECT * FROM sr_register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1', 'NestLoop(t1 t2) Leading((t1 t2))', '{int4}');
+psql:07_plpgsql.sql:10: LOG:  statement: SELECT * FROM sr_register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1', 'NestLoop(t1 t2) Leading((t1 t2))', '{int4}');
+psql:07_plpgsql.sql:10: LOG:  duration: 0.544 ms  plan:
+Query Text: SELECT * FROM sr_register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1', 'NestLoop(t1 t2) Leading((t1 t2))', '{int4}');
+Function Scan on sr_register_hints  (cost=0.00..0.01 rows=1 width=16)
+Optimizer: Postgres-based planner
+      name_hash      |      oid_hash      
+---------------------+--------------------
+ 3835130416726675823 | 561156481422406268
+(1 row)
+
+CREATE OR REPLACE FUNCTION f_cnt(x int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE r bigint;
+BEGIN
+  SELECT count(*) INTO r FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < x;
+  RETURN r;
+END $$;
+psql:07_plpgsql.sql:16: LOG:  statement: CREATE OR REPLACE FUNCTION f_cnt(x int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE r bigint;
+BEGIN
+  SELECT count(*) INTO r FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < x;
+  RETURN r;
+END $$;
+CREATE FUNCTION
+=== function call: look for the nested plan in the LOG lines ===
+SELECT f_cnt(500);
+psql:07_plpgsql.sql:18: LOG:  statement: SELECT f_cnt(500);
+psql:07_plpgsql.sql:18: NOTICE:  sr_plan: applying hints "NestLoop(t1 t2) Leading((t1 t2))" name_hash=3835130416726675823
+psql:07_plpgsql.sql:18: LOG:  duration: 19.095 ms  plan:
+Query Text: SELECT count(*)        FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < x
+Finalize Aggregate  (cost=2474.43..2474.44 rows=1 width=8)
+  ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=2474.38..2474.43 rows=3 width=8)
+        ->  Partial Aggregate  (cost=2474.38..2474.39 rows=1 width=8)
+              ->  Hash Join  (cost=530.74..2457.84 rows=6613 width=0)
+                    Hash Cond: (t2.t1_id = t1.id)
+                    ->  Seq Scan on t2  (cost=0.00..1513.33 rows=133333 width=4)
+                    ->  Hash  (cost=405.83..405.83 rows=9993 width=4)
+                          ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=107.95..405.83 rows=9993 width=4)
+                                ->  Bitmap Heap Scan on t1  (cost=107.95..272.59 rows=3331 width=4)
+                                      Recheck Cond: (v < 500)
+                                      ->  Bitmap Index Scan on t1_v_idx  (cost=0.00..107.11 rows=3331 width=0)
+                                            Index Cond: (v < 500)
+Optimizer: Postgres-based planner
+psql:07_plpgsql.sql:18: LOG:  duration: 24.293 ms  plan:
+Query Text: SELECT f_cnt(500);
+Result  (cost=0.00..0.26 rows=1 width=8)
+Optimizer: Postgres-based planner
+ f_cnt 
+-------
+ 20000
+(1 row)
+

@@ -1,0 +1,95 @@
+SET optimizer = off;
+SET
+SET gg_planman.log_usage = notice;
+SET
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+=== Postgres planner direct dispatch with and without stored hints ===
+SET gg_planman.enabled = off;
+SET
+EXPLAIN (COSTS off) SELECT * FROM t1 WHERE id = 42;
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 1:1  (slice1; segments: 1)
+   ->  Seq Scan on t1
+         Filter: (id = 42)
+ Optimizer: Postgres-based planner
+(4 rows)
+
+SET gg_planman.enabled = on;
+SET
+SELECT * FROM gg_planman.register_hints('SELECT * FROM t1 WHERE id = 1', 'IndexScan(t1)');
+ id  |       key_base       |       key_oid       |      slots      
+-----+----------------------+---------------------+-----------------
+ 141 | -3099847502272313971 | 8823055252831097124 | {public.t1=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT * FROM t1 WHERE id = 42;
+psql:10_invalidation.sql:10: NOTICE:  gg_planman: applying hints "IndexScan(t1)" id=141 key_base=-3099847502272313971 key_oid=8823055252831097124
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 1:1  (slice1; segments: 1)
+   ->  Seq Scan on t1
+         Filter: (id = 42)
+ Optimizer: Postgres-based planner
+(4 rows)
+
+=== disabling the row takes effect for the next planning ===
+UPDATE gg_planman.plans SET enabled = false WHERE id = (SELECT id FROM gg_planman.plans WHERE query = 'SELECT * FROM t1 WHERE id = 1');
+UPDATE 1
+EXPLAIN (COSTS off) SELECT * FROM t1 WHERE id = 42;
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 1:1  (slice1; segments: 1)
+   ->  Seq Scan on t1
+         Filter: (id = 42)
+ Optimizer: Postgres-based planner
+(4 rows)
+
+UPDATE gg_planman.plans SET enabled = true WHERE id = (SELECT id FROM gg_planman.plans WHERE query = 'SELECT * FROM t1 WHERE id = 1');
+UPDATE 1
+=== cached generic plan: DDL on a referenced table forces replanning ===
+SET plan_cache_mode = force_generic_plan;
+SET
+PREPARE q(int) AS SELECT * FROM t1 WHERE id = $1;
+PREPARE
+EXPLAIN (COSTS off) EXECUTE q(42);
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Seq Scan on t1
+         Filter: (id = $1)
+ Optimizer: Postgres-based planner
+(4 rows)
+
+SELECT * FROM gg_planman.register_hints('SELECT * FROM t1 WHERE id = $1', 'IndexScan(t1)', '{int4}');
+ id  |       key_base       |       key_oid       |      slots      
+-----+----------------------+---------------------+-----------------
+ 142 | -2015241160079107845 | 7935739885106572468 | {public.t1=oid}
+(1 row)
+
+EXPLAIN (COSTS off) EXECUTE q(42);
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Seq Scan on t1
+         Filter: (id = $1)
+ Optimizer: Postgres-based planner
+(4 rows)
+
+ALTER TABLE t1 ALTER COLUMN pad SET STATISTICS 50;
+ALTER TABLE
+EXPLAIN (COSTS off) EXECUTE q(42);
+psql:10_invalidation.sql:22: NOTICE:  gg_planman: applying hints "IndexScan(t1)" id=142 key_base=-2015241160079107845 key_oid=7935739885106572468
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Seq Scan on t1
+         Filter: (id = $1)
+ Optimizer: Postgres-based planner
+(4 rows)
+
+DEALLOCATE q;
+DEALLOCATE
+RESET plan_cache_mode;
+RESET

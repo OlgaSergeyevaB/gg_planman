@@ -1,0 +1,523 @@
+SET client_min_messages = warning;
+DROP TABLE IF EXISTS t1, t2, kt, kt_new, t1_new, pt, one_t, two_t CASCADE;
+DROP FUNCTION IF EXISTS kf(int);
+CREATE TABLE t1 (id int, v int, pad text) DISTRIBUTED BY (id);
+CREATE TABLE t2 (id int, t1_id int, w int) DISTRIBUTED BY (id);
+INSERT INTO t1 SELECT i, i % 10000, repeat('x', 20) FROM generate_series(1, 200000) i;
+INSERT INTO t2 SELECT i, (i % 200000) + 1, i % 100 FROM generate_series(1, 400000) i;
+CREATE INDEX t1_v_idx ON t1 (v);
+CREATE INDEX t2_t1_id_idx ON t2 (t1_id);
+CREATE TABLE kt (a int, b int, c int) DISTRIBUTED BY (a);
+INSERT INTO kt SELECT i, i, i % 100 FROM generate_series(1, 10000) i;
+CREATE INDEX kt_c_idx ON kt (c);
+ANALYZE t1;
+ANALYZE t2;
+ANALYZE kt;
+CREATE FUNCTION kf(int) RETURNS int AS 'select $1' LANGUAGE sql IMMUTABLE;
+TRUNCATE gg_planman.plans;
+RESET client_min_messages;
+SET gg_planman.log_usage = notice;
+SET
+SET optimizer = off;
+SET
+=== 0. four registered queries, the objects they depend on, and a clean check ===
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'NestLoop(t1 t2) Leading((t1 t2))');
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 261 | 1110863247016496802 | 4705911557200383257 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 WHERE v < $1', 'SeqScan(t1)', '{int4}');
+ id  |       key_base       |       key_oid       |      slots      
+-----+----------------------+---------------------+-----------------
+ 262 | -2957677536785901690 | -415761906849609868 | {public.t1=oid}
+(1 row)
+
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM kt WHERE c < 1', 'SeqScan(kt)');
+ id  |       key_base       |       key_oid       |      slots      
+-----+----------------------+---------------------+-----------------
+ 263 | -1743380901289718968 | -378630937232100565 | {public.kt=oid}
+(1 row)
+
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM kt WHERE kf(a) < 1', 'SeqScan(kt)');
+ id  |      key_base       |       key_oid        |      slots      
+-----+---------------------+----------------------+-----------------
+ 264 | -698256763284198274 | -7114886557939673253 | {public.kt=oid}
+(1 row)
+
+SELECT id, left(query, 42) AS query, relnames, reloids::text, funcoids::text, paramtypes FROM gg_planman.plans ORDER BY created_at;
+ id  |                   query                    | relnames |    reloids    | funcoids | paramtypes 
+-----+--------------------------------------------+----------+---------------+----------+------------
+ 261 | SELECT count(*) FROM t1 JOIN t2 ON t1.id = | {t1,t2}  | {79200,79205} | {}       | 
+ 262 | SELECT count(*) FROM t1 WHERE v < $1       | {t1}     | {79200}       | {}       | {integer}
+ 263 | SELECT count(*) FROM kt WHERE c < 1        | {kt}     | {79210}       | {}       | 
+ 264 | SELECT count(*) FROM kt WHERE kf(a) < 1    | {kt}     | {79210}       | {79214}  | 
+(4 rows)
+
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       | state | reason 
+---------------------+-------+--------
+ oid:79200 oid:79205 | valid | 
+ oid:79200           | valid | 
+ oid:79210           | valid | 
+ oid:79210           | valid | 
+(4 rows)
+
+=== 1. t1 is recreated by an ETL-style swap: the rows by OID stop applying, the check reports them ===
+CREATE TABLE t1_new AS SELECT * FROM t1 DISTRIBUTED BY (id);
+SELECT 200000
+DROP TABLE t1;
+DROP TABLE
+ALTER TABLE t1_new RENAME TO t1;
+ALTER TABLE
+CREATE INDEX t1_v_idx ON t1 (v);
+CREATE INDEX
+ANALYZE t1;
+ANALYZE
+--- the row is not applied and the log names the replaced table
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:21_invalidation.sql:43: NOTICE:  gg_planman: stored hints not applied id=261: table public.t1 was recreated, run gg_planman.check(regenerate => true) key_base=1110863247016496802 key_oid=4868041143785721110
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 500)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 500)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+--- the check reports the rows with the reason and writes nothing: in a read-only transaction it answers the same
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |            reason             
+---------------------+---------+-------------------------------
+ oid:79200 oid:79205 | invalid | table public.t1 was recreated
+ oid:79200           | invalid | table public.t1 was recreated
+ oid:79210           | valid   | 
+ oid:79210           | valid   | 
+(4 rows)
+
+BEGIN READ ONLY;
+BEGIN
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |            reason             
+---------------------+---------+-------------------------------
+ oid:79200 oid:79205 | invalid | table public.t1 was recreated
+ oid:79200           | invalid | table public.t1 was recreated
+ oid:79210           | valid   | 
+ oid:79210           | valid   | 
+(4 rows)
+
+COMMIT;
+COMMIT
+--- the log line goes on until the row is regenerated
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:21_invalidation.sql:50: NOTICE:  gg_planman: stored hints not applied id=261: table public.t1 was recreated, run gg_planman.check(regenerate => true) key_base=1110863247016496802 key_oid=4868041143785721110
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 500)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 500)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+--- regeneration from the stored text and parameter types; the ids stay
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+      identity       |    state    |            reason             
+---------------------+-------------+-------------------------------
+ oid:79200 oid:79205 | regenerated | table public.t1 was recreated
+ oid:79200           | regenerated | table public.t1 was recreated
+ oid:79210           | valid       | 
+ oid:79210           | valid       | 
+(4 rows)
+
+SELECT id, left(query, 42) AS query, reloids::text FROM gg_planman.plans ORDER BY created_at;
+ id  |                   query                    |    reloids    
+-----+--------------------------------------------+---------------
+ 263 | SELECT count(*) FROM kt WHERE c < 1        | {79210}
+ 264 | SELECT count(*) FROM kt WHERE kf(a) < 1    | {79210}
+ 261 | SELECT count(*) FROM t1 JOIN t2 ON t1.id = | {79215,79205}
+ 262 | SELECT count(*) FROM t1 WHERE v < $1       | {79215}
+(4 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:21_invalidation.sql:54: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=261 key_base=1110863247016496802 key_oid=4868041143785721110
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Bitmap Heap Scan on t1
+                                 Recheck Cond: (v < 500)
+                                 ->  Bitmap Index Scan on t1_v_idx
+                                       Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+PREPARE p(int) AS SELECT count(*) FROM t1 WHERE v < $1;
+PREPARE
+EXPLAIN (COSTS off) EXECUTE p(100);
+psql:21_invalidation.sql:56: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=262 key_base=-2957677536785901690 key_oid=-415761906849610105
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 100)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+DEALLOCATE p;
+DEALLOCATE
+=== 2. a rolled back DROP changes nothing ===
+BEGIN;
+BEGIN
+DROP TABLE t1;
+DROP TABLE
+ROLLBACK;
+ROLLBACK
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       | state | reason 
+---------------------+-------+--------
+ oid:79210           | valid | 
+ oid:79210           | valid | 
+ oid:79215 oid:79205 | valid | 
+ oid:79215           | valid | 
+(4 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:21_invalidation.sql:64: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=261 key_base=1110863247016496802 key_oid=4868041143785721110
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Bitmap Heap Scan on t1
+                                 Recheck Cond: (v < 500)
+                                 ->  Bitmap Index Scan on t1_v_idx
+                                       Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+=== 3. kt loses a column and is recreated: the check reports the recreation, the regeneration stores the new column numbers ===
+ALTER TABLE kt DROP COLUMN b;
+ALTER TABLE
+CREATE TABLE kt_new AS SELECT * FROM kt DISTRIBUTED BY (a);
+SELECT 10000
+DROP TABLE kt;
+DROP TABLE
+ALTER TABLE kt_new RENAME TO kt;
+ALTER TABLE
+CREATE INDEX kt_c_idx ON kt (c);
+CREATE INDEX
+ANALYZE kt;
+ANALYZE
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |            reason             
+---------------------+---------+-------------------------------
+ oid:79210           | invalid | table public.kt was recreated
+ oid:79210           | invalid | table public.kt was recreated
+ oid:79215 oid:79205 | valid   | 
+ oid:79215           | valid   | 
+(4 rows)
+
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+      identity       |    state    |            reason             
+---------------------+-------------+-------------------------------
+ oid:79210           | regenerated | table public.kt was recreated
+ oid:79210           | regenerated | table public.kt was recreated
+ oid:79215 oid:79205 | valid       | 
+ oid:79215           | valid       | 
+(4 rows)
+
+SELECT count(*) AS rows_total, count(*) FILTER (WHERE state <> 'valid') AS rows_invalid FROM gg_planman.check();
+ rows_total | rows_invalid 
+------------+--------------
+          4 |            0
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM kt WHERE c < 5;
+psql:21_invalidation.sql:76: NOTICE:  gg_planman: applying hints "SeqScan(kt)" id=263 key_base=-3155901116428862371 key_oid=-5279731203168575091
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on kt
+                     Filter: (c < 5)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+=== 4. a function: CREATE OR REPLACE keeps the OID and the row, DROP and CREATE replaces the OID ===
+CREATE OR REPLACE FUNCTION kf(int) RETURNS int AS 'select $1 + 0' LANGUAGE sql IMMUTABLE;
+CREATE FUNCTION
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       | state | reason 
+---------------------+-------+--------
+ oid:79215 oid:79205 | valid | 
+ oid:79215           | valid | 
+ oid:79221           | valid | 
+ oid:79221           | valid | 
+(4 rows)
+
+DROP FUNCTION kf(int);
+DROP FUNCTION
+CREATE FUNCTION kf(int) RETURNS int AS 'select $1' LANGUAGE sql IMMUTABLE;
+CREATE FUNCTION
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |                     reason                      
+---------------------+---------+-------------------------------------------------
+ oid:79215 oid:79205 | valid   | 
+ oid:79215           | valid   | 
+ oid:79221           | valid   | 
+ oid:79221           | invalid | function with OID 79214 was dropped or replaced
+(4 rows)
+
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+      identity       |    state    |                     reason                      
+---------------------+-------------+-------------------------------------------------
+ oid:79215 oid:79205 | valid       | 
+ oid:79215           | valid       | 
+ oid:79221           | valid       | 
+ oid:79221           | regenerated | function with OID 79214 was dropped or replaced
+(4 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM kt WHERE kf(a) < 5;
+psql:21_invalidation.sql:85: NOTICE:  gg_planman: applying hints "SeqScan(kt)" id=264 key_base=-6978243179061047287 key_oid=-3299157500506899855
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on kt
+                     Filter: (a < 5)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+=== 5. a table dropped for good: the regeneration reports its rows as still_invalid ===
+DROP TABLE kt;
+DROP TABLE
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+      identity       |     state     |            reason            
+---------------------+---------------+------------------------------
+ oid:79215 oid:79205 | valid         | 
+ oid:79215           | valid         | 
+ oid:79221           | still_invalid | relation "kt" does not exist
+ oid:79221           | still_invalid | relation "kt" does not exist
+(4 rows)
+
+--- the rows stay in the store as they are, and the next check reports them again
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |           reason            
+---------------------+---------+-----------------------------
+ oid:79215 oid:79205 | valid   | 
+ oid:79215           | valid   | 
+ oid:79221           | invalid | table public.kt was dropped
+ oid:79221           | invalid | table public.kt was dropped
+(4 rows)
+
+=== 6. an ALTER that keeps the key leaves the row valid; a column type change is reported as key changed ===
+ALTER TABLE t1 ADD COLUMN note text;
+ALTER TABLE
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |           reason            
+---------------------+---------+-----------------------------
+ oid:79215 oid:79205 | valid   | 
+ oid:79215           | valid   | 
+ oid:79221           | invalid | table public.kt was dropped
+ oid:79221           | invalid | table public.kt was dropped
+(4 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:21_invalidation.sql:96: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=261 key_base=1110863247016496802 key_oid=4868041143785721110
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Bitmap Heap Scan on t1
+                                 Recheck Cond: (v < 500)
+                                 ->  Bitmap Index Scan on t1_v_idx
+                                       Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+ALTER TABLE t1 ALTER COLUMN v TYPE bigint;
+ALTER TABLE
+ANALYZE t1;
+ANALYZE
+--- the key of the query differs now: the row is not found, the check says key changed
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 500)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 500)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |           reason            
+---------------------+---------+-----------------------------
+ oid:79215 oid:79205 | invalid | key changed
+ oid:79215           | invalid | key changed
+ oid:79221           | invalid | table public.kt was dropped
+ oid:79221           | invalid | table public.kt was dropped
+(4 rows)
+
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+      identity       |     state     |            reason            
+---------------------+---------------+------------------------------
+ oid:79215 oid:79205 | regenerated   | key changed
+ oid:79215           | regenerated   | key changed
+ oid:79221           | still_invalid | relation "kt" does not exist
+ oid:79221           | still_invalid | relation "kt" does not exist
+(4 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:21_invalidation.sql:103: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=261 key_base=-7145468124261533037 key_oid=7839392423994393682
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Bitmap Heap Scan on t1
+                                 Recheck Cond: (v < 500)
+                                 ->  Bitmap Index Scan on t1_v_idx
+                                       Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+=== 7. a partitioned table: adding a partition keeps the key and the row ===
+CREATE TABLE pt (id int, d date, v int) DISTRIBUTED BY (id)
+  PARTITION BY RANGE (d) (START ('2026-01-01') END ('2026-04-01') EVERY (INTERVAL '1 month'));
+CREATE TABLE
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM pt WHERE v = 1', 'SeqScan(pt)');
+ id  |      key_base       |       key_oid        |      slots      
+-----+---------------------+----------------------+-----------------
+ 265 | 2102075915649936896 | -3100904357278080961 | {public.pt=oid}
+(1 row)
+
+ALTER TABLE pt ADD PARTITION START ('2026-04-01') END ('2026-05-01');
+ALTER TABLE
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |           reason            
+---------------------+---------+-----------------------------
+ oid:79221           | invalid | table public.kt was dropped
+ oid:79221           | invalid | table public.kt was dropped
+ oid:79215 oid:79205 | valid   | 
+ oid:79215           | valid   | 
+ oid:79232           | valid   | 
+(5 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM pt WHERE v = 7;
+psql:21_invalidation.sql:111: NOTICE:  gg_planman: applying hints "SeqScan(pt)" id=265 key_base=2102075915649936896 key_oid=-3100904357278080961
+                   QUERY PLAN                    
+-------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Append
+                     ->  Seq Scan on pt_1_prt_1
+                           Filter: (v = 7)
+                     ->  Seq Scan on pt_1_prt_2
+                           Filter: (v = 7)
+                     ->  Seq Scan on pt_1_prt_3
+                           Filter: (v = 7)
+                     ->  Seq Scan on pt_1_prt_11
+                           Filter: (v = 7)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+=== 8. one row by its id: check(row_id => ...) examines and regenerates that row only ===
+CREATE TABLE one_t (id int, v int) DISTRIBUTED BY (id);
+CREATE TABLE
+CREATE TABLE two_t (id int, v int) DISTRIBUTED BY (id);
+CREATE TABLE
+SELECT id AS one_id FROM gg_planman.register_hints('SELECT count(*) FROM one_t WHERE v = 1', 'SeqScan(one_t)') 
+SELECT id AS two_id FROM gg_planman.register_hints('SELECT count(*) FROM two_t WHERE v = 1', 'SeqScan(two_t)') 
+DROP TABLE one_t, two_t;
+DROP TABLE
+CREATE TABLE one_t (id int, v int) DISTRIBUTED BY (id);
+CREATE TABLE
+CREATE TABLE two_t (id int, v int) DISTRIBUTED BY (id);
+CREATE TABLE
+--- both tables were recreated; the check by id reports the row over one_t only
+SELECT id, state, reason FROM gg_planman.check(row_id => 266);
+ id  |  state  |              reason              
+-----+---------+----------------------------------
+ 266 | invalid | table public.one_t was recreated
+(1 row)
+
+--- regeneration of that row only; the id stays, the row over two_t is untouched
+SELECT id, state, reason FROM gg_planman.check(regenerate => true, row_id => 266);
+ id  |    state    |              reason              
+-----+-------------+----------------------------------
+ 266 | regenerated | table public.one_t was recreated
+(1 row)
+
+SELECT id, reloids::text, (SELECT oid FROM pg_class WHERE relname = relnames[1])::text AS current_oid FROM gg_planman.plans WHERE id IN (266, 267) ORDER BY id;
+ id  | reloids | current_oid 
+-----+---------+-------------
+ 266 | {79253} | 79253
+ 267 | {79250} | 79256
+(2 rows)
+
+--- an id without a row is an error
+SELECT id, state, reason FROM gg_planman.check(row_id => 0);
+psql:21_invalidation.sql:127: ERROR:  no stored row with id 0
+CONTEXT:  PL/pgSQL function gg_planman."check"(boolean,bigint) line 13 at RAISE
+--- the full check still finds the row over two_t
+SELECT id, state, reason FROM gg_planman.check() WHERE id IN (266, 267) ORDER BY id;
+ id  |  state  |              reason              
+-----+---------+----------------------------------
+ 266 | valid   | 
+ 267 | invalid | table public.two_t was recreated
+(2 rows)
+
+SET client_min_messages = warning;
+DROP TABLE IF EXISTS kt, pt, one_t, two_t CASCADE;
+DROP FUNCTION IF EXISTS kf(int);
+TRUNCATE gg_planman.plans;

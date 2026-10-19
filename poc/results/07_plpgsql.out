@@ -1,0 +1,68 @@
+SET optimizer = off;
+SET
+SET gg_planman.log_usage = notice;
+SET
+LOAD 'auto_explain';
+LOAD
+SET auto_explain.log_min_duration = 0;
+SET
+SET auto_explain.log_nested_statements = on;
+SET
+SET auto_explain.log_analyze = off;
+SET
+SET client_min_messages = log;
+SET
+TRUNCATE gg_planman.plans;
+psql:07_plpgsql.sql:9: LOG:  statement: TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1', 'NestLoop(t1 t2) Leading((t1 t2))', '{int4}');
+psql:07_plpgsql.sql:10: LOG:  statement: SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1', 'NestLoop(t1 t2) Leading((t1 t2))', '{int4}');
+psql:07_plpgsql.sql:10: LOG:  duration: 0.603 ms  plan:
+Query Text: SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1', 'NestLoop(t1 t2) Leading((t1 t2))', '{int4}');
+Function Scan on register_hints  (cost=0.00..0.01 rows=1 width=56)
+Optimizer: Postgres-based planner
+ id |       key_base       |       key_oid        |             slots             
+----+----------------------+----------------------+-------------------------------
+ 81 | -6667503556398202216 | -8460128921304450874 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+CREATE OR REPLACE FUNCTION f_cnt(x int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE r bigint;
+BEGIN
+  SELECT count(*) INTO r FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < x;
+  RETURN r;
+END $$;
+psql:07_plpgsql.sql:16: LOG:  statement: CREATE OR REPLACE FUNCTION f_cnt(x int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE r bigint;
+BEGIN
+  SELECT count(*) INTO r FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < x;
+  RETURN r;
+END $$;
+CREATE FUNCTION
+=== function call: look for the nested plan in the LOG lines ===
+SELECT f_cnt(500);
+psql:07_plpgsql.sql:18: LOG:  statement: SELECT f_cnt(500);
+psql:07_plpgsql.sql:18: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=81 key_base=-6667503556398202216 key_oid=-8460128921304450874
+psql:07_plpgsql.sql:18: LOG:  duration: 19.038 ms  plan:
+Query Text: SELECT count(*)        FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < x
+Finalize Aggregate  (cost=3500.82..3500.83 rows=1 width=8)
+  ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=3500.76..3500.81 rows=3 width=8)
+        ->  Partial Aggregate  (cost=3500.76..3500.77 rows=1 width=8)
+              ->  Nested Loop  (cost=106.08..3484.56 rows=6483 width=0)
+                    ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=105.91..399.08 rows=9724 width=4)
+                          ->  Bitmap Heap Scan on t1  (cost=105.91..269.43 rows=3241 width=4)
+                                Recheck Cond: (v < 500)
+                                ->  Bitmap Index Scan on t1_v_idx  (cost=0.00..105.10 rows=3241 width=0)
+                                      Index Cond: (v < 500)
+                    ->  Index Only Scan using t2_t1_id_idx on t2  (cost=0.17..0.31 rows=1 width=4)
+                          Index Cond: (t1_id = t1.id)
+Optimizer: Postgres-based planner
+psql:07_plpgsql.sql:18: LOG:  duration: 25.425 ms  plan:
+Query Text: SELECT f_cnt(500);
+Result  (cost=0.00..0.26 rows=1 width=8)
+Optimizer: Postgres-based planner
+ f_cnt 
+-------
+ 20000
+(1 row)
+

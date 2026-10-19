@@ -1,0 +1,50 @@
+Truncated batch size to number of primaries: 4
+
+Connected as user 'gpadmin' to database 'srpoc', port '7300', gpdb version '7.4'
+-------------------------------------------------------------------
+Batch size: 4
+Performing test 'unique_index_violation'
+Total runtime for test 'unique_index_violation': 0:00:00.50
+Performing test 'duplicate'
+Total runtime for test 'duplicate': 0:00:01.70
+Performing test 'missing_extraneous'
+Total runtime for test 'missing_extraneous': 0:00:00.35
+Performing test 'inconsistent'
+Total runtime for test 'inconsistent': 0:00:01.43
+Performing test 'foreign_key'
+Total runtime for test 'foreign_key': 0:00:00.70
+Performing test 'pgclass'
+Total runtime for test 'pgclass': 0:00:00.01
+Performing test 'namespace'
+Total runtime for test 'namespace': 0:00:00.00
+Performing test 'distribution_policy'
+Total runtime for test 'distribution_policy': 0:00:00.00
+Performing test 'dependency'
+Total runtime for test 'dependency': 0:00:00.04
+Performing test 'part_integrity'
+Total runtime for test 'part_integrity': 0:00:00.02
+Performing test 'orphaned_toast_tables'
+Total runtime for test 'orphaned_toast_tables': 0:00:00.03
+Performing test 'aoseg_table'
+Total runtime for test 'aoseg_table': 0:00:00.00
+Performing test 'ao_lastrownums'
+Total runtime for test 'ao_lastrownums': 0:00:00.00
+Performing test 'mix_distribution_policy'
+Total runtime for test 'mix_distribution_policy': 0:00:00.00
+Performing test 'replicated_distribution_policy'
+Total runtime for test 'replicated_distribution_policy': 0:00:00.00
+
+SUMMARY REPORT: FAILED
+===================================================================
+Completed 15 test(s) on database 'srpoc' at 2026-09-17 17:45:21 with elapsed time 0:00:04
+Found a total of 1 issue(s)
+
+----------------------------------------------------
+Relation oid: 17380
+Relation schema: public
+Relation name: sr_hints
+
+    Name of test which found this issue: missing_extraneous_gp_distribution_policy
+        Missing distribution_policy metadata of {'localoid': 17380} on content -1 (olga-CREFG-XX:7300) 
+
+

@@ -1,0 +1,130 @@
+SET client_min_messages = warning;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN CREATE ROLE app_user LOGIN; END IF;
+END $$;
+GRANT USAGE ON SCHEMA public TO app_user;
+DROP TABLE IF EXISTS priv_t;
+CREATE TABLE priv_t (id int, v int) DISTRIBUTED BY (id);
+GRANT SELECT ON priv_t TO app_user;
+TRUNCATE gg_planman.plans;
+RESET client_min_messages;
+SELECT rolname, rolsuper FROM pg_roles WHERE rolname IN (current_user, 'app_user') ORDER BY rolsuper;
+ rolname  | rolsuper 
+----------+----------
+ app_user | f
+ olga     | t
+
+SET ROLE app_user;
+SET
+=== 1. a role that is not a superuser: register_hints refuses, UPDATE of the store is denied ===
+SELECT gg_planman.register_hints('SELECT count(*) FROM priv_t WHERE v < 1', 'SeqScan(priv_t)');
+psql:30_privileges.sql:20: ERROR:  must be superuser to store hints
+UPDATE gg_planman.plans SET enabled = false;
+psql:30_privileges.sql:21: ERROR:  permission denied for table plans
+=== 2. write mode, switching the extension off, the table itself, the check without SELECT on the store and the regeneration refuse as well ===
+SET gg_planman.write_mode = on;
+psql:30_privileges.sql:24: ERROR:  permission denied to set parameter "gg_planman.write_mode"
+SET gg_planman.enabled = off;
+psql:30_privileges.sql:25: ERROR:  permission denied to set parameter "gg_planman.enabled"
+SELECT count(*) FROM gg_planman.plans;
+psql:30_privileges.sql:26: ERROR:  permission denied for table plans
+DELETE FROM gg_planman.plans;
+psql:30_privileges.sql:27: ERROR:  permission denied for table plans
+SELECT * FROM gg_planman.check();
+psql:30_privileges.sql:28: ERROR:  permission denied for table plans
+CONTEXT:  SQL statement "SELECT p.id, p.key_base, p.identity, p.query, p.paramtypes, p.by_name, p.by_regex,
+					p.relschemas, p.relnames, p.reloids, p.rules, p.funcoids
+			   FROM gg_planman.plans p
+			  WHERE row_id IS NULL OR p.id = row_id
+			  ORDER BY p.created_at, p.id"
+PL/pgSQL function gg_planman."check"(boolean,bigint) line 16 at FOR over SELECT rows
+SELECT * FROM gg_planman.check(regenerate => true);
+psql:30_privileges.sql:29: ERROR:  must be superuser to regenerate stored hints
+CONTEXT:  PL/pgSQL function gg_planman."check"(boolean,bigint) line 10 at RAISE
+=== 2a. query_key is open to any role: the keys and the slots of a text, nothing is stored ===
+SELECT key_base IS NOT NULL AS has_key_base, key_oid IS NOT NULL AS has_key_oid, slots FROM gg_planman.query_key('SELECT count(*) FROM priv_t WHERE v < 1');
+ has_key_base | has_key_oid |        slots        
+--------------+-------------+---------------------
+ t            | t           | {public.priv_t=oid}
+
+RESET ROLE;
+RESET
+SELECT count(*) AS rows_in_the_store FROM gg_planman.plans;
+ rows_in_the_store 
+-------------------
+                 0
+
+=== 3. a superuser stores hints, and they apply to the queries of every role ===
+SELECT gg_planman.register_hints('SELECT count(*) FROM priv_t WHERE v < 1', 'SeqScan(priv_t)') IS NOT NULL AS registered;
+ registered 
+------------
+ t
+
+SET ROLE app_user;
+SET
+SET gg_planman.log_usage = notice;
+SET
+SET optimizer = off;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM priv_t WHERE v < 5;
+psql:30_privileges.sql:41: NOTICE:  gg_planman: applying hints "SeqScan(priv_t)" id=361 key_base=-378416003890871246 key_oid=-6725584360647991054
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on priv_t
+                     Filter: (v < 5)
+ Optimizer: Postgres-based planner
+
+RESET ROLE;
+RESET
+=== 4. the support engineer: SELECT on the store gives the report, the regeneration stays with the superuser ===
+SET client_min_messages = warning;
+CREATE SCHEMA priv_s;
+CREATE TABLE priv_s.pt (id int, v int) DISTRIBUTED BY (id);
+GRANT SELECT ON gg_planman.plans TO app_user;
+RESET client_min_messages;
+SELECT gg_planman.register_hints('SELECT count(*) FROM priv_s.pt WHERE v < 1', 'SeqScan(pt)') IS NOT NULL AS registered;
+ registered 
+------------
+ t
+
+CREATE TABLE priv_t_new (LIKE priv_t) DISTRIBUTED BY (id);
+CREATE TABLE
+DROP TABLE priv_t;
+DROP TABLE
+ALTER TABLE priv_t_new RENAME TO priv_t;
+ALTER TABLE
+SET ROLE app_user;
+SET
+--- the row over priv_t is invalid; the text over priv_s.pt does not resolve without USAGE on priv_s, so its key is not checked
+SELECT identity, state, reason FROM gg_planman.check();
+ identity  |  state  |                        reason                        
+-----------+---------+------------------------------------------------------
+ oid:79317 | invalid | table public.priv_t was recreated
+ oid:79321 | valid   | key not checked: permission denied for schema priv_s
+
+SELECT * FROM gg_planman.check(regenerate => true);
+psql:30_privileges.sql:59: ERROR:  must be superuser to regenerate stored hints
+CONTEXT:  PL/pgSQL function gg_planman."check"(boolean,bigint) line 10 at RAISE
+RESET ROLE;
+RESET
+--- the superuser sees the same rows, resolves every text, and regenerates
+SELECT identity, state, reason FROM gg_planman.check();
+ identity  |  state  |              reason               
+-----------+---------+-----------------------------------
+ oid:79317 | invalid | table public.priv_t was recreated
+ oid:79321 | valid   | 
+
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+ identity  |    state    |              reason               
+-----------+-------------+-----------------------------------
+ oid:79317 | regenerated | table public.priv_t was recreated
+ oid:79321 | valid       | 
+
+SET client_min_messages = warning;
+REVOKE SELECT ON gg_planman.plans FROM app_user;
+DROP SCHEMA priv_s CASCADE;
+DROP TABLE priv_t;
+TRUNCATE gg_planman.plans;

@@ -1,0 +1,34 @@
+SELECT q, name_hash, oid_hash FROM (
+          SELECT 1 AS n, 'captured: v < 100' AS q, * FROM sr_query_keys('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 100')
+UNION ALL SELECT 2, 'other constant: v < 999999', * FROM sr_query_keys('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 999999')
+UNION ALL SELECT 3, 'formatting and case', * FROM sr_query_keys(E'select COUNT(*)\n   from T1 join T2 on T1.ID=T2.T1_ID\n  where T1.V<100')
+UNION ALL SELECT 4, 'schema-qualified names', * FROM sr_query_keys('SELECT count(*) FROM public.t1 JOIN public.t2 ON t1.id = t2.t1_id WHERE t1.v < 100')
+UNION ALL SELECT 5, 'aliases a, b', * FROM sr_query_keys('SELECT count(*) FROM t1 a JOIN t2 b ON a.id = b.t1_id WHERE a.v < 100')
+UNION ALL SELECT 6, 'quoted literal ''100''', * FROM sr_query_keys('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < ''100''')
+UNION ALL SELECT 7, 'numeric literal 100.0', * FROM sr_query_keys('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 100.0')
+UNION ALL SELECT 8, 'parameter $1 int4', * FROM sr_query_keys('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1', '{int4}')
+UNION ALL SELECT 9, 'join order swapped in FROM', * FROM sr_query_keys('SELECT count(*) FROM t2 JOIN t1 ON t1.id = t2.t1_id WHERE t1.v < 100')
+UNION ALL SELECT 10, 'IN (1,2)', * FROM sr_query_keys('SELECT count(*) FROM t1 WHERE v IN (1,2)')
+UNION ALL SELECT 11, 'IN (1,2,3)', * FROM sr_query_keys('SELECT count(*) FROM t1 WHERE v IN (1,2,3)')
+UNION ALL SELECT 12, '= ANY(ARRAY[1,2,3])', * FROM sr_query_keys('SELECT count(*) FROM t1 WHERE v = ANY(ARRAY[1,2,3])')
+UNION ALL SELECT 13, 'LIMIT 10', * FROM sr_query_keys('SELECT * FROM t1 WHERE v < 5 LIMIT 10')
+UNION ALL SELECT 14, 'LIMIT 100000', * FROM sr_query_keys('SELECT * FROM t1 WHERE v < 5 LIMIT 100000')
+) s ORDER BY n;
+             q              |      name_hash       |       oid_hash       
+----------------------------+----------------------+----------------------
+ captured: v < 100          | -2282368155202536457 |   414763569458614489
+ other constant: v < 999999 | -2282368155202536457 |   414763569458614489
+ formatting and case        | -2282368155202536457 |   414763569458614489
+ schema-qualified names     | -2282368155202536457 |   414763569458614489
+ aliases a, b               | -2282368155202536457 |   414763569458614489
+ quoted literal '100'       | -2282368155202536457 |   414763569458614489
+ numeric literal 100.0      |  7292595723046363785 |  7610156169820734993
+ parameter $1 int4          |  3835130416726675823 | -4142554573216088891
+ join order swapped in FROM | -1958872446963473695 |  8783405661377801913
+ IN (1,2)                   |  1221121711811258702 | -3107760624072078789
+ IN (1,2,3)                 |  6494691984950123268 |  1879190845000220468
+ = ANY(ARRAY[1,2,3])        |  6494691984950123268 |  1879190845000220468
+ LIMIT 10                   | -2268380601271775763 | -3165453884850441586
+ LIMIT 100000               | -2268380601271775763 | -3165453884850441586
+(14 rows)
+

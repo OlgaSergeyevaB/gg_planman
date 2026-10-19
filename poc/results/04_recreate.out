@@ -1,0 +1,137 @@
+SET optimizer = off;
+SET
+SET gg_planman.log_usage = notice;
+SET
+=== before recreation ===
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:04_recreate.sql:6: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=201 key_base=1110863247016496802 key_oid=5750746670750338341
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(10 rows)
+
+=== recreate t1 as ETL does: new table, same name, same index name ===
+CREATE TABLE t1_new (id int, v int, pad text) DISTRIBUTED BY (id);
+CREATE TABLE
+INSERT INTO t1_new SELECT * FROM t1;
+INSERT 0 200000
+DROP TABLE t1;
+DROP TABLE
+ALTER TABLE t1_new RENAME TO t1;
+ALTER TABLE
+CREATE INDEX t1_v_idx ON t1 (v);
+CREATE INDEX
+ANALYZE t1;
+ANALYZE
+=== after recreation: the row still carries the old reloids and is not applied ===
+SELECT hints, reloids::text, (SELECT array_agg(oid ORDER BY relname)::text FROM pg_class WHERE relname IN ('t1','t2')) AS current_oids FROM gg_planman.plans;
+                          hints                          |    reloids    | current_oids  
+---------------------------------------------------------+---------------+---------------
+ NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2)) | {79166,79171} | {79176,79171}
+ NestLoop(a b) Leading((a b))                            | {79166,79171} | {79176,79171}
+(2 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:04_recreate.sql:18: NOTICE:  gg_planman: stored hints not applied id=201: table public.t1 was recreated, run gg_planman.check(regenerate => true) key_base=1110863247016496802 key_oid=4273565992972815699
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 500)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 500)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+=== the service check reports the row invalid with the reason and writes nothing ===
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |            reason             
+---------------------+---------+-------------------------------
+ oid:79166 oid:79171 | invalid | table public.t1 was recreated
+ oid:79166 oid:79171 | invalid | table public.t1 was recreated
+(2 rows)
+
+=== regeneration from the stored text ===
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+      identity       |    state    |            reason             
+---------------------+-------------+-------------------------------
+ oid:79166 oid:79171 | regenerated | table public.t1 was recreated
+ oid:79166 oid:79171 | regenerated | table public.t1 was recreated
+(2 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:04_recreate.sql:25: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=201 key_base=1110863247016496802 key_oid=4273565992972815699
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(10 rows)
+
+=== index recreated under another name: hint names an index that no longer exists ===
+DROP INDEX t1_v_idx;
+DROP INDEX
+CREATE INDEX t1_v_idx_2026 ON t1 (v);
+CREATE INDEX
+SET pg_hint_plan.debug_print = on;
+SET
+SET client_min_messages = log;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:04_recreate.sql:32: LOG:  statement: EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:04_recreate.sql:32: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=201 key_base=1110863247016496802 key_oid=4273565992972815699
+psql:04_recreate.sql:32: LOG:  available indexes for IndexScan(t1):
+psql:04_recreate.sql:32: LOG:  pg_hint_plan:
+used hint:
+IndexScan(t1 t1_v_idx)
+NestLoop(t1 t2)
+Leading((t1 t2))
+not used hint:
+duplication hint:
+error hint:
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Seq Scan on t1
+                                 Filter: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(10 rows)
+
+RESET client_min_messages;
+psql:04_recreate.sql:33: LOG:  statement: RESET client_min_messages;
+RESET
+RESET pg_hint_plan.debug_print;
+RESET
+DROP INDEX t1_v_idx_2026;
+DROP INDEX
+CREATE INDEX t1_v_idx ON t1 (v);
+CREATE INDEX

@@ -1,0 +1,22 @@
+SET optimizer = off;
+SET
+SET gg_planman.log_usage = notice;
+SET
+CREATE TEMP TABLE tt AS SELECT * FROM t1 WHERE v < 2000 DISTRIBUTED BY (id);
+SELECT 40000
+CREATE INDEX tt_v_idx ON tt (v);
+CREATE INDEX
+ANALYZE tt;
+ANALYZE
+EXPLAIN (COSTS off) SELECT count(*) FROM tt WHERE v = 20;
+psql:08_temp_session2.sql:7: NOTICE:  gg_planman: applying hints "SeqScan(tt)" id=241 key_base=-2662240520306124045 key_oid=-
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on tt
+                     Filter: (v = 20)
+ Optimizer: Postgres-based planner
+(6 rows)
+

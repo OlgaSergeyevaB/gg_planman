@@ -1,0 +1,33 @@
+SET gg_planman.log_usage = notice;
+SET
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+=== a role that is not a superuser cannot change the store: the function, the table and the setting refuse ===
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN CREATE ROLE app_user LOGIN; END IF;
+END $$;
+DO
+GRANT USAGE ON SCHEMA public TO app_user;
+GRANT
+GRANT SELECT ON t1, t2 TO app_user;
+GRANT
+SET ROLE app_user;
+SET
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 WHERE v < 1', 'Set(work_mem 64kB) SeqScan(t1)');
+psql:12_edge_cases.sql:12: ERROR:  must be superuser to store hints
+INSERT INTO gg_planman.plans (key_base, enabled, hints, query, n_oid, n_name, n_regex, identity, created_at) VALUES (1, true, 'x', 'x', 0, 0, 0, '', now());
+psql:12_edge_cases.sql:13: ERROR:  permission denied for table plans
+SET gg_planman.write_mode = on;
+psql:12_edge_cases.sql:14: ERROR:  permission denied to set parameter "gg_planman.write_mode"
+RESET ROLE;
+RESET
+SELECT hints FROM gg_planman.plans;
+ hints 
+-------
+(0 rows)
+
+=== multi-statement query string captured in write mode ===
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+SET gg_planman.write_mode = on;
+SET

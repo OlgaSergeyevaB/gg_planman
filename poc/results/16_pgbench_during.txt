@@ -1,0 +1,10 @@
+transaction type: bench_join.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 4
+duration: 20 s
+number of transactions actually processed: 2596
+latency average = 30.851 ms
+tps = 129.653726 (including connections establishing)
+tps = 129.694147 (excluding connections establishing)

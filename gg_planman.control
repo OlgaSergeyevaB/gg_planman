@@ -1,0 +1,5 @@
+# gg_planman extension
+comment = 'plan management for Greengage: stored hints'
+default_version = '0.1'
+module_pathname = '$libdir/gg_planman'
+relocatable = false

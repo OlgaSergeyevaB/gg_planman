@@ -1,0 +1,217 @@
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS pg_hint_plan;
+DELETE FROM hint_plan.hints;
+RESET client_min_messages;
+SET gg_planman.enabled = off;
+SET
+SET optimizer = off;
+SET
+SET pg_hint_plan.enable_hint_table = on;
+SET
+SET pg_hint_plan.debug_print = detailed;
+SET
+SET pg_hint_plan.message_level = notice;
+SET
+=== 0. one row: the text as the client sends it, constants replaced by ?, any application ===
+INSERT INTO hint_plan.hints (norm_query_string, application_name, hints)
+VALUES ('EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < ?;', '', 'SeqScan(t1)');
+psql:31_hint_table_text_key.sql:22: NOTICE:  pg_hint_plan[qno=0x35]: planner: enable_hint=1, hint_inhibit_level=1
+psql:31_hint_table_text_key.sql:22: NOTICE:  pg_hint_plan[qno=0x35]: planner: no valid hint
+psql:31_hint_table_text_key.sql:22: NOTICE:  pg_hint_plan[qno=0x37]: no match found in table:  application name = "psql", normalized_query="INSERT INTO hint_plan.hints (norm_query_string, application_name, hints)
+VALUES (?, ?, ?);"
+psql:31_hint_table_text_key.sql:22: NOTICE:  hints in comment="(none)", query="INSERT INTO hint_plan.hints (norm_query_string, application_name, hints)
+VALUES ('EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < ?;', '', 'SeqScan(t1)');", debug_query_string="INSERT INTO hint_plan.hints (norm_query_string, application_name, hints)
+VALUES ('EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < ?;', '', 'SeqScan(t1)');"
+psql:31_hint_table_text_key.sql:22: NOTICE:  pg_hint_plan[qno=0x37]: planner: enable_hint=1, hint_inhibit_level=1
+psql:31_hint_table_text_key.sql:22: NOTICE:  pg_hint_plan[qno=0x37]: planner: no valid hint
+psql:31_hint_table_text_key.sql:22: NOTICE:  pg_hint_plan[qno=0x39]: no match found in table:  application name = "psql", normalized_query="INSERT INTO hint_plan.hints (norm_query_string, application_name, hints)
+VALUES (?, ?, ?);"
+psql:31_hint_table_text_key.sql:22: NOTICE:  hints in comment="(none)", query="INSERT INTO hint_plan.hints (norm_query_string, application_name, hints)
+VALUES ('EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < ?;', '', 'SeqScan(t1)');", debug_query_string="INSERT INTO hint_plan.hints (norm_query_string, application_name, hints)
+VALUES ('EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < ?;', '', 'SeqScan(t1)');"
+psql:31_hint_table_text_key.sql:22: NOTICE:  pg_hint_plan[qno=0x37]: planner: no valid hint
+INSERT 0 1
+SELECT * FROM hint_plan.hints;
+psql:31_hint_table_text_key.sql:23: NOTICE:  pg_hint_plan[qno=0x39]: planner: enable_hint=1, hint_inhibit_level=1
+psql:31_hint_table_text_key.sql:23: NOTICE:  pg_hint_plan[qno=0x39]: planner: no valid hint
+psql:31_hint_table_text_key.sql:23: NOTICE:  pg_hint_plan[qno=0x3b]: no match found in table:  application name = "psql", normalized_query="SELECT * FROM hint_plan.hints;"
+psql:31_hint_table_text_key.sql:23: NOTICE:  hints in comment="(none)", query="SELECT * FROM hint_plan.hints;", debug_query_string="SELECT * FROM hint_plan.hints;"
+psql:31_hint_table_text_key.sql:23: NOTICE:  pg_hint_plan[qno=0x3b]: planner: enable_hint=1, hint_inhibit_level=1
+psql:31_hint_table_text_key.sql:23: NOTICE:  pg_hint_plan[qno=0x3b]: planner: no valid hint
+psql:31_hint_table_text_key.sql:23: NOTICE:  pg_hint_plan[qno=0x3d]: no match found in table:  application name = "psql", normalized_query="SELECT * FROM hint_plan.hints;"
+psql:31_hint_table_text_key.sql:23: NOTICE:  hints in comment="(none)", query="SELECT * FROM hint_plan.hints;", debug_query_string="SELECT * FROM hint_plan.hints;"
+psql:31_hint_table_text_key.sql:23: NOTICE:  pg_hint_plan[qno=0x3b]: planner: no valid hint
+ id |                    norm_query_string                     | application_name |    hints    
+----+----------------------------------------------------------+------------------+-------------
+  1 | EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < ?; |                  | SeqScan(t1)
+
+=== 1. the same text with another constant: found, the plan is a sequential scan ===
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < 5000;
+psql:31_hint_table_text_key.sql:26: NOTICE:  pg_hint_plan[qno=0x3d]: planner: enable_hint=1, hint_inhibit_level=1
+psql:31_hint_table_text_key.sql:26: NOTICE:  pg_hint_plan[qno=0x3d]: planner: no valid hint
+psql:31_hint_table_text_key.sql:26: NOTICE:  pg_hint_plan[qno=0x3f]: post_parse_analyze_hook: hints from table: "SeqScan(t1)": normalized_query="EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE v < ?;", application name ="psql"
+psql:31_hint_table_text_key.sql:26: NOTICE:  pg_hint_plan[qno=0x3d]: planner
+psql:31_hint_table_text_key.sql:26: NOTICE:  pg_hint_plan[qno=0x3d]: setup_hint_enforcement index deletion: relation=70259(t1), inhparent=0, current_hint_state=0x5a24fa2e5068, hint_inhibit_level=0, scanmask=0x1
+psql:31_hint_table_text_key.sql:26: NOTICE:  pg_hint_plan[qno=0x3d]: HintStateDump: {used hints:SeqScan(t1)}, {not used hints:(none)}, {duplicate hints:(none)}, {error hints:(none)}
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 5000)
+ Optimizer: Postgres-based planner
+
+=== 2. two spaces after SELECT: not found ===
+EXPLAIN (COSTS off) SELECT  count(*) FROM t1 WHERE v < 100;
+psql:31_hint_table_text_key.sql:29: NOTICE:  pg_hint_plan[qno=0x3f]: planner: enable_hint=1, hint_inhibit_level=1
+psql:31_hint_table_text_key.sql:29: NOTICE:  pg_hint_plan[qno=0x3f]: planner: no valid hint
+psql:31_hint_table_text_key.sql:29: NOTICE:  pg_hint_plan[qno=0x41]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) SELECT  count(*) FROM t1 WHERE v < ?;"
+psql:31_hint_table_text_key.sql:29: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) SELECT  count(*) FROM t1 WHERE v < 100;", debug_query_string="EXPLAIN (COSTS off) SELECT  count(*) FROM t1 WHERE v < 100;"
+psql:31_hint_table_text_key.sql:29: NOTICE:  pg_hint_plan[qno=0x43]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) SELECT  count(*) FROM t1 WHERE v < ?;"
+psql:31_hint_table_text_key.sql:29: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) SELECT  count(*) FROM t1 WHERE v < 100;", debug_query_string="EXPLAIN (COSTS off) SELECT  count(*) FROM t1 WHERE v < 100;"
+psql:31_hint_table_text_key.sql:29: NOTICE:  pg_hint_plan[qno=0x41]: planner: no valid hint
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Bitmap Heap Scan on t1
+                     Recheck Cond: (v < 100)
+                     ->  Bitmap Index Scan on t1_v_idx
+                           Index Cond: (v < 100)
+ Optimizer: Postgres-based planner
+
+=== 3. a comment inside the text: not found ===
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 /* report 7 */ WHERE v < 100;
+psql:31_hint_table_text_key.sql:32: NOTICE:  pg_hint_plan[qno=0x45]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) SELECT count(*) FROM t1 /* report 7 */ WHERE v < ?;"
+psql:31_hint_table_text_key.sql:32: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) SELECT count(*) FROM t1 /* report 7 */ WHERE v < 100;", debug_query_string="EXPLAIN (COSTS off) SELECT count(*) FROM t1 /* report 7 */ WHERE v < 100;"
+psql:31_hint_table_text_key.sql:32: NOTICE:  pg_hint_plan[qno=0x47]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) SELECT count(*) FROM t1 /* report 7 */ WHERE v < ?;"
+psql:31_hint_table_text_key.sql:32: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) SELECT count(*) FROM t1 /* report 7 */ WHERE v < 100;", debug_query_string="EXPLAIN (COSTS off) SELECT count(*) FROM t1 /* report 7 */ WHERE v < 100;"
+psql:31_hint_table_text_key.sql:32: NOTICE:  pg_hint_plan[qno=0x45]: planner: no valid hint
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Bitmap Heap Scan on t1
+                     Recheck Cond: (v < 100)
+                     ->  Bitmap Index Scan on t1_v_idx
+                           Index Cond: (v < 100)
+ Optimizer: Postgres-based planner
+
+=== 4. a line break instead of a space: not found ===
+EXPLAIN (COSTS off) SELECT count(*) FROM t1
+WHERE v < 100;
+psql:31_hint_table_text_key.sql:36: NOTICE:  pg_hint_plan[qno=0x49]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) SELECT count(*) FROM t1
+WHERE v < ?;"
+psql:31_hint_table_text_key.sql:36: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) SELECT count(*) FROM t1
+WHERE v < 100;", debug_query_string="EXPLAIN (COSTS off) SELECT count(*) FROM t1
+WHERE v < 100;"
+psql:31_hint_table_text_key.sql:36: NOTICE:  pg_hint_plan[qno=0x4b]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) SELECT count(*) FROM t1
+WHERE v < ?;"
+psql:31_hint_table_text_key.sql:36: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) SELECT count(*) FROM t1
+WHERE v < 100;", debug_query_string="EXPLAIN (COSTS off) SELECT count(*) FROM t1
+WHERE v < 100;"
+psql:31_hint_table_text_key.sql:36: NOTICE:  pg_hint_plan[qno=0x49]: planner: no valid hint
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Bitmap Heap Scan on t1
+                     Recheck Cond: (v < 100)
+                     ->  Bitmap Index Scan on t1_v_idx
+                           Index Cond: (v < 100)
+ Optimizer: Postgres-based planner
+
+=== 5. lower case: not found ===
+EXPLAIN (COSTS off) select count(*) from t1 where v < 100;
+psql:31_hint_table_text_key.sql:39: NOTICE:  pg_hint_plan[qno=0x4d]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) select count(*) from t1 where v < ?;"
+psql:31_hint_table_text_key.sql:39: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) select count(*) from t1 where v < 100;", debug_query_string="EXPLAIN (COSTS off) select count(*) from t1 where v < 100;"
+psql:31_hint_table_text_key.sql:39: NOTICE:  pg_hint_plan[qno=0x4f]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) select count(*) from t1 where v < ?;"
+psql:31_hint_table_text_key.sql:39: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) select count(*) from t1 where v < 100;", debug_query_string="EXPLAIN (COSTS off) select count(*) from t1 where v < 100;"
+psql:31_hint_table_text_key.sql:39: NOTICE:  pg_hint_plan[qno=0x4d]: planner: no valid hint
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Bitmap Heap Scan on t1
+                     Recheck Cond: (v < 100)
+                     ->  Bitmap Index Scan on t1_v_idx
+                           Index Cond: (v < 100)
+ Optimizer: Postgres-based planner
+
+=== 6. the table qualified with its schema: not found ===
+EXPLAIN (COSTS off) SELECT count(*) FROM public.t1 WHERE v < 100;
+psql:31_hint_table_text_key.sql:42: NOTICE:  pg_hint_plan[qno=0x51]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) SELECT count(*) FROM public.t1 WHERE v < ?;"
+psql:31_hint_table_text_key.sql:42: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) SELECT count(*) FROM public.t1 WHERE v < 100;", debug_query_string="EXPLAIN (COSTS off) SELECT count(*) FROM public.t1 WHERE v < 100;"
+psql:31_hint_table_text_key.sql:42: NOTICE:  pg_hint_plan[qno=0x53]: no match found in table:  application name = "psql", normalized_query="EXPLAIN (COSTS off) SELECT count(*) FROM public.t1 WHERE v < ?;"
+psql:31_hint_table_text_key.sql:42: NOTICE:  hints in comment="(none)", query="EXPLAIN (COSTS off) SELECT count(*) FROM public.t1 WHERE v < 100;", debug_query_string="EXPLAIN (COSTS off) SELECT count(*) FROM public.t1 WHERE v < 100;"
+psql:31_hint_table_text_key.sql:42: NOTICE:  pg_hint_plan[qno=0x51]: planner: no valid hint
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Bitmap Heap Scan on t1
+                     Recheck Cond: (v < 100)
+                     ->  Bitmap Index Scan on t1_v_idx
+                           Index Cond: (v < 100)
+ Optimizer: Postgres-based planner
+
+=== 7. the plain SELECT does not match the row stored with the EXPLAIN prefix ===
+SELECT count(*) FROM t1 WHERE v < 100;
+psql:31_hint_table_text_key.sql:45: NOTICE:  pg_hint_plan[qno=0x55]: no match found in table:  application name = "psql", normalized_query="SELECT count(*) FROM t1 WHERE v < ?;"
+psql:31_hint_table_text_key.sql:45: NOTICE:  hints in comment="(none)", query="SELECT count(*) FROM t1 WHERE v < 100;", debug_query_string="SELECT count(*) FROM t1 WHERE v < 100;"
+psql:31_hint_table_text_key.sql:45: NOTICE:  pg_hint_plan[qno=0x57]: no match found in table:  application name = "psql", normalized_query="SELECT count(*) FROM t1 WHERE v < ?;"
+psql:31_hint_table_text_key.sql:45: NOTICE:  hints in comment="(none)", query="SELECT count(*) FROM t1 WHERE v < 100;", debug_query_string="SELECT count(*) FROM t1 WHERE v < 100;"
+psql:31_hint_table_text_key.sql:45: NOTICE:  pg_hint_plan[qno=0x55]: planner: no valid hint
+ count 
+-------
+  2000
+
+=== 8. the same query shape in gg_planman: one row serves every spelling ===
+SET pg_hint_plan.enable_hint_table = off;
+psql:31_hint_table_text_key.sql:48: NOTICE:  hints in comment="(none)", query="SET pg_hint_plan.enable_hint_table = off;", debug_query_string="SET pg_hint_plan.enable_hint_table = off;"
+SET
+SET pg_hint_plan.debug_print = off;
+psql:31_hint_table_text_key.sql:49: NOTICE:  hints in comment="(none)", query="SET pg_hint_plan.debug_print = off;", debug_query_string="SET pg_hint_plan.debug_print = off;"
+SET
+SET gg_planman.enabled = on;
+SET
+SET gg_planman.log_usage = notice;
+SET
+SELECT id FROM gg_planman.register_hints('SELECT count(*) FROM t1 WHERE v < 1', 'SeqScan(t1)') 
+EXPLAIN (COSTS off) SELECT  count(*) FROM t1 /* report 7 */ WHERE v < 100;
+psql:31_hint_table_text_key.sql:53: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=561 key_base=-5968910461829091811 key_oid=9156208074715542063
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 100)
+ Optimizer: Postgres-based planner
+
+EXPLAIN (COSTS off) select count(*) from public.t1
+where v < 5000;
+psql:31_hint_table_text_key.sql:55: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=561 key_base=-5968910461829091811 key_oid=9156208074715542063
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 5000)
+ Optimizer: Postgres-based planner
+
+DELETE FROM gg_planman.plans WHERE id = 561;
+DELETE 1
+SET client_min_messages = warning;
+DELETE FROM hint_plan.hints;
+RESET pg_hint_plan.enable_hint_table;
+RESET pg_hint_plan.debug_print;
+RESET pg_hint_plan.message_level;
+DROP EXTENSION pg_hint_plan;

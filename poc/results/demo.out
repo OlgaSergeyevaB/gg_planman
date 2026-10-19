@@ -1,0 +1,602 @@
+
+╔══════════════════════════════════════════════════════════════════════╗
+║  PoC gg_planman на Greengage 7: к запросу хранятся хинты pg_hint_plan  ║
+║  t1 — 200 000 строк, DISTRIBUTED BY (id), индекс по v                ║
+║  t2 — 400 000 строк, DISTRIBUTED BY (id), индекс по t1_id            ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+Настройки сессии: gg_planman.log_usage = notice — видно каждое применение хинтов.
+
+══ 1. Проблема: план, который выбирает планировщик Postgres ═══════════════
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 100;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 100)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 100)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+
+══ 2. Захват: DBA один раз выполняет запрос с комментарием-хинтом ════════
+   gg_planman.write_mode = on: комментарий /*+ ... */ сохраняется в gg_planman.plans
+   вместе с текстом запроса и списком объектов, от которых запрос зависит.
+
+/*+ NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2)) */
+SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 100;
+psql:/projects/sr_plan-poc/poc/demo.sql:53: NOTICE:  gg_planman: stored hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=521 key_base=1110863247016496802 key_oid=-85918446321826985
+ count 
+-------
+  4000
+(1 row)
+
+
+Что сохранилось:
+      key_base       |      key_oid       |                          hints                          | relnames |    reloids    
+---------------------+--------------------+---------------------------------------------------------+----------+---------------
+ 1110863247016496802 | -85918446321826985 | NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2)) | {t1,t2}  | {79426,79431}
+(1 row)
+
+
+══ 3. Применение: тот же запрос, другая константа, без комментария ═══════
+   Ключ не содержит значений констант, поэтому v < 500 находит хинты,
+   сохранённые для v < 100. План строится заново с реальной константой.
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:/projects/sr_plan-poc/poc/demo.sql:71: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=521 key_base=1110863247016496802 key_oid=-85918446321826985
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(10 rows)
+
+
+Результат с хинтами и без них одинаковый:
+SELECT count(*) AS with_hints FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:/projects/sr_plan-poc/poc/demo.sql:76: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=521 key_base=1110863247016496802 key_oid=-85918446321826985
+ with_hints 
+------------
+      20000
+(1 row)
+
+SET gg_planman.enabled = off;
+SET
+SELECT count(*) AS without_hints FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+ without_hints 
+---------------
+         20000
+(1 row)
+
+SET gg_planman.enabled = on;
+SET
+
+══ 3а. Запрос со своими хинтами в комментарии ════════════════════════════
+   Хинты, явно написанные в тексте запроса, главнее сохранённых:
+   применяются они, а сохранённая строка остаётся как была.
+
+/*+ HashJoin(t1 t2) */ EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:/projects/sr_plan-poc/poc/demo.sql:91: NOTICE:  gg_planman: hints of the query text applied, stored hints not used id=521 key_base=1110863247016496802 key_oid=-85918446321826985
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 500)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 500)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+
+══ 4. Ключ запроса: что игнорируется, а что нет ══════════════════════════
+   gg_planman.query_key() считает ключи для текста запроса, ничего не выполняя.
+
+            вариант запроса            |       key_base       |       key_oid        
+---------------------------------------+----------------------+----------------------
+ исходный: v < 100                     |  1110863247016496802 |   -85918446321826985
+ другая константа: v < 999999          |  1110863247016496802 |   -85918446321826985
+ другое форматирование и регистр       |  1110863247016496802 |   -85918446321826985
+ имена со схемой public.t1             |  1110863247016496802 |   -85918446321826985
+ алиасы a, b — другой ключ             | -8572375589231877517 | -4718039728481658228
+ параметр $1 — другой ключ             | -6667503556398202216 |  4996626765278607466
+ литерал 100.0 (numeric) — другой ключ | -5831913900761244942 |  6673810626629097343
+(7 rows)
+
+Строки 1–4 совпадают: константы, форматирование и схема в ключи не входят.
+key_base не содержит таблиц вовсе, key_oid — свёртка key_base с OID таблиц запроса.
+Алиасы входят намеренно: pg_hint_plan адресует таблицы по алиасу.
+
+══ 5. Регистрация без выполнения запроса: prepared statement ═════════════
+   Приложение шлёт запрос с параметром $1. DBA регистрирует хинты
+   по тексту с $1 и типом параметра — сам запрос выполнять не нужно.
+
+PREPARE p(int) AS SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1;
+PREPARE
+EXPLAIN (COSTS off) EXECUTE p(100);
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 100)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 100)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1', 'NestLoop(t1 t2) Leading((t1 t2))', '{int4}');
+ id  |       key_base       |       key_oid       |             slots             
+-----+----------------------+---------------------+-------------------------------
+ 522 | -6667503556398202216 | 4996626765278607466 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) EXECUTE p(100);
+psql:/projects/sr_plan-poc/poc/demo.sql:126: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=522 key_base=-6667503556398202216 key_oid=4996626765278607466
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Bitmap Heap Scan on t1
+                                 Recheck Cond: (v < 100)
+                                 ->  Bitmap Index Scan on t1_v_idx
+                                       Index Cond: (v < 100)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+DEALLOCATE
+
+══ 6. Таблица пересоздана: служебная проверка показывает, какие хинты не работают ══
+   Строка сопоставляется с таблицей по OID. Когда таблицу удаляют, зависящие от неё
+   строки по OID перестают применяться; gg_planman.check() показывает их с причиной,
+   ничего не записывая в хранилище, а check(regenerate => true) регистрирует заново.
+
+Ночная загрузка пересоздала t1: новая таблица, то же имя, тот же индекс.
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:/projects/sr_plan-poc/poc/demo.sql:152: NOTICE:  gg_planman: stored hints not applied id=521: table public.t1 was recreated, run gg_planman.check(regenerate => true) key_base=1110863247016496802 key_oid=-410177619492502695
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Bitmap Heap Scan on t1
+                                       Recheck Cond: (v < 500)
+                                       ->  Bitmap Index Scan on t1_v_idx
+                                             Index Cond: (v < 500)
+ Optimizer: Postgres-based planner
+(13 rows)
+
+SELECT identity, state, reason FROM gg_planman.check();
+      identity       |  state  |            reason             
+---------------------+---------+-------------------------------
+ oid:79426 oid:79431 | invalid | table public.t1 was recreated
+ oid:79426 oid:79431 | invalid | table public.t1 was recreated
+(2 rows)
+
+
+-- перегенерация одной командой: текст запроса и типы параметров уже в хранилище
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+      identity       |    state    |            reason             
+---------------------+-------------+-------------------------------
+ oid:79426 oid:79431 | regenerated | table public.t1 was recreated
+ oid:79426 oid:79431 | regenerated | table public.t1 was recreated
+(2 rows)
+
+SELECT id, hints, reloids::text FROM gg_planman.plans ORDER BY created_at;
+ id  |                          hints                          |    reloids    
+-----+---------------------------------------------------------+---------------
+ 521 | NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2)) | {79436,79431}
+ 522 | NestLoop(t1 t2) Leading((t1 t2))                        | {79436,79431}
+(2 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:/projects/sr_plan-poc/poc/demo.sql:160: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) IndexScan(t1 t1_v_idx) Leading((t1 t2))" id=521 key_base=1110863247016496802 key_oid=-410177619492502695
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(10 rows)
+
+
+══ 7. Временные таблицы: другая сессия, своя временная таблица ═══════════
+   У временной таблицы в каждой сессии свой OID. DBA указывает её в by_name,
+   и строка сопоставляется с ней по имени; без этого регистрация отклоняется.
+
+CREATE TEMP TABLE tt AS SELECT * FROM t1 WHERE v < 2000 DISTRIBUTED BY (id);
+SELECT 40000
+CREATE INDEX tt_v_idx ON tt (v);
+CREATE INDEX
+ANALYZE tt;
+ANALYZE
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM tt WHERE v = 1', 'SeqScan(tt)', by_name => '{pg_temp.tt}');
+ id  |       key_base       | key_oid |          slots           
+-----+----------------------+---------+--------------------------
+ 523 | -2662240520306124045 |         | {pg_temp.tt=schema.name}
+(1 row)
+
+
+-- \c: новое соединение, новая сессия, свой pg_temp
+CREATE TEMP TABLE tt AS SELECT * FROM t1 WHERE v < 2000 DISTRIBUTED BY (id);
+SELECT 40000
+CREATE INDEX tt_v_idx ON tt (v);
+CREATE INDEX
+ANALYZE tt;
+ANALYZE
+EXPLAIN (COSTS off) SELECT count(*) FROM tt WHERE v = 20;
+psql:/projects/sr_plan-poc/poc/demo.sql:188: NOTICE:  gg_planman: applying hints "SeqScan(tt)" id=523 key_base=-2662240520306124045 key_oid=-
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on tt
+                     Filter: (v = 20)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+
+══ 7а. Функция удалена и создана заново ═════════════════════════════════
+
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 WHERE demo_f(v) < 1', 'SeqScan(t1)');
+ id  |       key_base       |       key_oid        |      slots      
+-----+----------------------+----------------------+-----------------
+ 541 | -7002056642187954167 | -3184837859032848106 | {public.t1=oid}
+(1 row)
+
+DROP FUNCTION demo_f(int);
+DROP FUNCTION
+CREATE FUNCTION demo_f(int) RETURNS int AS 'select $1' LANGUAGE sql IMMUTABLE;
+CREATE FUNCTION
+SELECT identity, state, reason FROM gg_planman.check(regenerate => true);
+      identity       |    state    |                     reason                      
+---------------------+-------------+-------------------------------------------------
+ oid:79436 oid:79431 | valid       | 
+ oid:79436 oid:79431 | valid       | 
+ schema:pg_temp.tt   | valid       | 
+ oid:79436           | regenerated | function with OID 79458 was dropped or replaced
+(4 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 WHERE demo_f(v) < 50;
+psql:/projects/sr_plan-poc/poc/demo.sql:208: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=541 key_base=507532343249334437 key_oid=8494939962101226421
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on t1
+                     Filter: (v < 50)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+
+══ 8. Direct dispatch сохраняется ═══════════════════════════════════════
+   Точечный запрос по ключу распределения с хинтами по-прежнему
+   уходит на один сегмент: план строится с реальной константой.
+
+SELECT * FROM gg_planman.register_hints('SELECT * FROM t1 WHERE id = 1 AND v < 1', 'IndexScan(t1 t1_v_idx)');
+ id  |       key_base       |       key_oid        |      slots      
+-----+----------------------+----------------------+-----------------
+ 542 | -3033316864868032543 | -7607778546808958193 | {public.t1=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT * FROM t1 WHERE id = 123 AND v < 50;
+psql:/projects/sr_plan-poc/poc/demo.sql:224: NOTICE:  gg_planman: applying hints "IndexScan(t1 t1_v_idx)" id=542 key_base=-3033316864868032543 key_oid=-7607778546808958193
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 1:1  (slice1; segments: 1)
+   ->  Index Scan using t1_v_idx on t1
+         Index Cond: (v < 50)
+         Filter: (id = 123)
+ Optimizer: GPORCA
+(5 rows)
+
+
+══ 9. Внутри PL/pgSQL ═══════════════════════════════════════════════════
+
+CREATE OR REPLACE FUNCTION f_cnt(x int) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE r bigint;
+BEGIN
+  SELECT count(*) INTO r FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < x;
+  RETURN r;
+END $$;
+CREATE FUNCTION
+-- client_min_messages = log, чтобы auto_explain показал план вложенного запроса
+SELECT f_cnt(500);
+psql:/projects/sr_plan-poc/poc/demo.sql:252: LOG:  statement: SELECT f_cnt(500);
+psql:/projects/sr_plan-poc/poc/demo.sql:252: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2) Leading((t1 t2))" id=522 key_base=-6667503556398202216 key_oid=5104713156335499380
+psql:/projects/sr_plan-poc/poc/demo.sql:252: LOG:  duration: 10.727 ms  plan:
+Query Text: SELECT count(*)        FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < x
+Finalize Aggregate  (cost=3448.87..3448.88 rows=1 width=8)
+  ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=3448.81..3448.86 rows=3 width=8)
+        ->  Partial Aggregate  (cost=3448.81..3448.82 rows=1 width=8)
+              ->  Nested Loop  (cost=100.52..3433.02 rows=6316 width=0)
+                    ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=100.35..389.90 rows=9518 width=4)
+                          ->  Bitmap Heap Scan on t1  (cost=100.35..263.00 rows=3173 width=4)
+                                Recheck Cond: (v < 500)
+                                ->  Bitmap Index Scan on t1_v_idx  (cost=0.00..99.55 rows=3173 width=0)
+                                      Index Cond: (v < 500)
+                    ->  Index Only Scan using t2_t1_id_idx on t2  (cost=0.17..0.31 rows=1 width=4)
+                          Index Cond: (t1_id = t1.id)
+Optimizer: Postgres-based planner
+psql:/projects/sr_plan-poc/poc/demo.sql:252: LOG:  duration: 14.806 ms  plan:
+Query Text: SELECT f_cnt(500);
+Result  (cost=0.00..0.26 rows=1 width=8)
+Optimizer: Postgres-based planner
+ f_cnt 
+-------
+ 20000
+(1 row)
+
+psql:/projects/sr_plan-poc/poc/demo.sql:255: LOG:  statement: RESET client_min_messages;
+(план вложенного запроса выше выведен auto_explain: Nested Loop по хинтам)
+
+══ 10. ORCA: что из хинтов понимает, а что нет ═══════════════════════════
+
+-- без хинтов
+SET gg_planman.enabled = off;
+SET
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: t2.t1_id
+                           ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+ Optimizer: GPORCA
+(12 rows)
+
+SET gg_planman.enabled = on;
+SET
+
+-- NestLoop(t1 t2): ORCA метод соединения игнорирует
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'NestLoop(t1 t2)');
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 521 | 1110863247016496802 | -410177619492502695 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:/projects/sr_plan-poc/poc/demo.sql:279: NOTICE:  gg_planman: applying hints "NestLoop(t1 t2)" id=521 key_base=1110863247016496802 key_oid=-410177619492502695
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: t2.t1_id
+                           ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+ Optimizer: GPORCA
+(12 rows)
+
+
+-- SeqScan(t1): метод доступа ORCA выполняет
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'SeqScan(t1)');
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 521 | 1110863247016496802 | -410177619492502695 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:/projects/sr_plan-poc/poc/demo.sql:285: NOTICE:  gg_planman: applying hints "SeqScan(t1)" id=521 key_base=1110863247016496802 key_oid=-410177619492502695
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: t2.t1_id
+                           ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Seq Scan on t1
+                                 Filter: (v < 500)
+ Optimizer: GPORCA
+(12 rows)
+
+
+-- Обход: Set(optimizer off) в хинтах — этот запрос планирует Postgres,
+   и все хинты работают; для сессии optimizer остаётся on
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'Set(optimizer off) NestLoop(t1 t2) Leading((t1 t2))');
+ id  |      key_base       |       key_oid       |             slots             
+-----+---------------------+---------------------+-------------------------------
+ 521 | 1110863247016496802 | -410177619492502695 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+psql:/projects/sr_plan-poc/poc/demo.sql:292: NOTICE:  gg_planman: applying hints "Set(optimizer off) NestLoop(t1 t2) Leading((t1 t2))" id=521 key_base=1110863247016496802 key_oid=-410177619492502695
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Nested Loop
+                     ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                           ->  Bitmap Heap Scan on t1
+                                 Recheck Cond: (v < 500)
+                                 ->  Bitmap Index Scan on t1_v_idx
+                                       Index Cond: (v < 500)
+                     ->  Index Only Scan using t2_t1_id_idx on t2
+                           Index Cond: (t1_id = t1.id)
+ Optimizer: Postgres-based planner
+(12 rows)
+
+SHOW optimizer;
+ optimizer 
+-----------
+ on
+(1 row)
+
+
+══ 11. Отключение и включение сохранённых хинтов ════════════════════════
+   у строки есть id: он в результате регистрации, в строке журнала и в таблице;
+   DBA переключает строку обычным UPDATE. Кэшированные планы сессий расширение
+   не сбрасывает: они перестраиваются после DDL по таблице или переподключения.
+
+SELECT id, enabled, hints FROM gg_planman.plans ORDER BY id;
+ id  | enabled |                        hints                        
+-----+---------+-----------------------------------------------------
+ 521 | t       | Set(optimizer off) NestLoop(t1 t2) Leading((t1 t2))
+ 522 | t       | NestLoop(t1 t2) Leading((t1 t2))
+ 523 | t       | SeqScan(tt)
+ 541 | t       | SeqScan(t1)
+ 542 | t       | IndexScan(t1 t1_v_idx)
+(5 rows)
+
+UPDATE gg_planman.plans SET enabled = false WHERE id = (SELECT min(id) FROM gg_planman.plans WHERE query = 'SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1');
+UPDATE 1
+EXPLAIN (COSTS off) SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 500;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (t2.t1_id = t1.id)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: t2.t1_id
+                           ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Index Scan using t1_v_idx on t1
+                                 Index Cond: (v < 500)
+ Optimizer: GPORCA
+(12 rows)
+
+
+══ 12. Таблицы по имени и по шаблону ════════════════════════════════════
+   Обычно строка сопоставляется с таблицами запроса по OID. В by_name DBA
+   называет таблицы, которые сопоставляются по имени, в by_regex — по
+   регулярному выражению: одна строка обслуживает все подходящие таблицы.
+
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM sales_2026 s WHERE s.v < 1', 'SeqScan(s)', by_regex => '{^public\\.sales_}');
+ id  |      key_base      | key_oid |                     slots                     
+-----+--------------------+---------+-----------------------------------------------
+ 543 | 230948756002631127 |         | {"public.sales_2026=regex(^public\\.sales_)"}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM sales_2025 s WHERE s.v < 50;
+psql:/projects/sr_plan-poc/poc/demo.sql:333: NOTICE:  gg_planman: applying hints "SeqScan(s)" id=543 key_base=230948756002631127 key_oid=-4876514999277291275
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on sales_2025 s
+                     Filter: (v < 50)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+
+-- строка с точным именем специфичнее шаблона, а строка по OID специфичнее обеих
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM sales_2026 s WHERE s.v < 1', 'IndexScan(s sales_2026_v_idx)', by_name => '{sales_2026}');
+ id  |      key_base      | key_oid |          slots           
+-----+--------------------+---------+--------------------------
+ 544 | 230948756002631127 |         | {public.sales_2026=name}
+(1 row)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM sales_2026 s WHERE s.v < 50;
+psql:/projects/sr_plan-poc/poc/demo.sql:339: NOTICE:  gg_planman: applying hints "IndexScan(s sales_2026_v_idx)" id=544 key_base=230948756002631127 key_oid=-4876514999277291278
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Index Scan using sales_2026_v_idx on sales_2026 s
+                     Index Cond: (v < 50)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+EXPLAIN (COSTS off) SELECT count(*) FROM sales_2025 s WHERE s.v < 50;
+psql:/projects/sr_plan-poc/poc/demo.sql:340: NOTICE:  gg_planman: applying hints "SeqScan(s)" id=543 key_base=230948756002631127 key_oid=-4876514999277291275
+                   QUERY PLAN                   
+------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on sales_2025 s
+                     Filter: (v < 50)
+ Optimizer: Postgres-based planner
+(6 rows)
+
+SELECT key_oid IS NOT NULL AS by_oid, hints, rules, patterns FROM gg_planman.plans WHERE 'sales_2026' = ANY(relnames) ORDER BY created_at;
+ by_oid |             hints             |  rules  |       patterns       
+--------+-------------------------------+---------+----------------------
+ f      | SeqScan(s)                    | {regex} | {"^public\\.sales_"}
+ f      | IndexScan(s sales_2026_v_idx) | {name}  | {NULL}
+(2 rows)
+
+
+══ Что осталось в хранилище ══════════════════════════════════════════════
+ enabled |                        hints                        |     rules     |                  query                   
+---------+-----------------------------------------------------+---------------+------------------------------------------
+ t       | NestLoop(t1 t2) Leading((t1 t2))                    | {oid,oid}     | SELECT count(*) FROM t1 JOIN t2 ON t1.id
+ t       | SeqScan(tt)                                         | {schema.name} | SELECT count(*) FROM tt WHERE v = 1
+ t       | SeqScan(t1)                                         | {oid}         | SELECT count(*) FROM t1 WHERE demo_f(v) 
+ t       | IndexScan(t1 t1_v_idx)                              | {oid}         | SELECT * FROM t1 WHERE id = 1 AND v < 1
+ f       | Set(optimizer off) NestLoop(t1 t2) Leading((t1 t2)) | {oid,oid}     | SELECT count(*) FROM t1 JOIN t2 ON t1.id
+ t       | SeqScan(s)                                          | {regex}       | SELECT count(*) FROM sales_2026 s WHERE 
+ t       | IndexScan(s sales_2026_v_idx)                       | {name}        | SELECT count(*) FROM sales_2026 s WHERE 
+(7 rows)
+
+
+Конец демонстрации. Открыть psql: ./demo.sh psql

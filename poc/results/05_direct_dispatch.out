@@ -1,0 +1,77 @@
+SET gg_planman.log_usage = notice;
+SET
+SELECT * FROM gg_planman.register_hints('SELECT * FROM t1 WHERE id = 5 AND v < 10', 'IndexScan(t1 t1_v_idx)');
+ id |       key_base       |       key_oid        |      slots      
+----+----------------------+----------------------+-----------------
+ 41 | -3033316864868032543 | -7607778546808932292 | {public.t1=oid}
+(1 row)
+
+=== Postgres planner ===
+SET optimizer = off;
+SET
+SET gg_planman.enabled = off;
+SET
+EXPLAIN (COSTS off) SELECT * FROM t1 WHERE id = 123 AND v < 50;
+                QUERY PLAN                 
+-------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Bitmap Heap Scan on t1
+         Recheck Cond: (v < 50)
+         Filter: (id = 123)
+         ->  Bitmap Index Scan on t1_v_idx
+               Index Cond: (v < 50)
+ Optimizer: Postgres-based planner
+(7 rows)
+
+SET gg_planman.enabled = on;
+SET
+EXPLAIN (COSTS off) SELECT * FROM t1 WHERE id = 123 AND v < 50;
+psql:05_direct_dispatch.sql:9: NOTICE:  gg_planman: applying hints "IndexScan(t1 t1_v_idx)" id=41 key_base=-3033316864868032543 key_oid=-7607778546808932292
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Index Scan using t1_v_idx on t1
+         Index Cond: (v < 50)
+         Filter: (id = 123)
+ Optimizer: Postgres-based planner
+(5 rows)
+
+EXPLAIN (COSTS off) SELECT * FROM t1 WHERE id = 77777 AND v < 50;
+psql:05_direct_dispatch.sql:10: NOTICE:  gg_planman: applying hints "IndexScan(t1 t1_v_idx)" id=41 key_base=-3033316864868032543 key_oid=-7607778546808932292
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Index Scan using t1_v_idx on t1
+         Index Cond: (v < 50)
+         Filter: (id = 77777)
+ Optimizer: Postgres-based planner
+(5 rows)
+
+=== ORCA ===
+SET optimizer = on;
+SET
+SET gg_planman.enabled = off;
+SET
+EXPLAIN (COSTS off) SELECT * FROM t1 WHERE id = 123 AND v < 50;
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 1:1  (slice1; segments: 1)
+   ->  Index Scan using t1_v_idx on t1
+         Index Cond: (v < 50)
+         Filter: (id = 123)
+ Optimizer: GPORCA
+(5 rows)
+
+SET gg_planman.enabled = on;
+SET
+EXPLAIN (COSTS off) SELECT * FROM t1 WHERE id = 123 AND v < 50;
+psql:05_direct_dispatch.sql:16: NOTICE:  gg_planman: applying hints "IndexScan(t1 t1_v_idx)" id=41 key_base=-3033316864868032543 key_oid=-7607778546808932292
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 1:1  (slice1; segments: 1)
+   ->  Index Scan using t1_v_idx on t1
+         Index Cond: (v < 50)
+         Filter: (id = 123)
+ Optimizer: GPORCA
+(5 rows)
+

@@ -1,0 +1,7 @@
+=== writer errors ===
+=== rows for the shape (expected 1) ===
+1
+=== pgbench planning the same query during 600 registrations ===
+latency average = 30.851 ms
+tps = 129.653726 (including connections establishing)
+tps = 129.694147 (excluding connections establishing)

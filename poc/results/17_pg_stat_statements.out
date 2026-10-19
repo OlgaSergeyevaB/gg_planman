@@ -1,0 +1,64 @@
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+psql:17_pg_stat_statements.sql:2: NOTICE:  extension "pg_stat_statements" already exists, skipping
+CREATE EXTENSION
+TRUNCATE gg_planman.plans;
+TRUNCATE TABLE
+SELECT * FROM gg_planman.register_hints('SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 1', 'NestLoop(t1 t2) Leading((t1 t2))');
+       key_base       |       key_oid       |             slots             
+----------------------+---------------------+-------------------------------
+ -7145468124261533037 | 4452685504211726492 | {public.t1=oid,public.t2=oid}
+(1 row)
+
+SET optimizer = off;
+SET
+SELECT pg_stat_statements_reset();
+ pg_stat_statements_reset 
+--------------------------
+ 
+(1 row)
+
+=== three executions with stored hints, three without ===
+SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 100;
+ count 
+-------
+  4000
+(1 row)
+
+SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 200;
+ count 
+-------
+  8000
+(1 row)
+
+SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < 300;
+ count 
+-------
+ 12000
+(1 row)
+
+SELECT count(*) FROM t2 WHERE w < 3;
+ count 
+-------
+ 12000
+(1 row)
+
+SELECT count(*) FROM t2 WHERE w < 4;
+ count 
+-------
+ 16000
+(1 row)
+
+SELECT count(*) FROM t2 WHERE w < 5;
+ count 
+-------
+ 20000
+(1 row)
+
+=== pg_stat_statements entries ===
+SELECT queryid, calls, rows, query FROM pg_stat_statements WHERE query ILIKE '%count(*)%' ORDER BY query;
+       queryid        | calls | rows |                                query                                
+----------------------+-------+------+---------------------------------------------------------------------
+  5494150969789709289 |     3 |    3 | SELECT count(*) FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.v < $1
+ -2368450287984898064 |     3 |    3 | SELECT count(*) FROM t2 WHERE w < $1
+(2 rows)
+
